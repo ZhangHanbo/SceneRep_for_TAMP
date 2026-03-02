@@ -9,7 +9,7 @@ import csv
 import datetime
 
 DATASETS_ROOT = "/media/wby/6d811df4-bde7-479b-ab4c-679222653ea0/dataset_done_multi"
-META_FILE = "eval_objects_multi.json"     # 统一meta文件
+META_FILE = "eval_objects_debug.json"     # 统一meta文件
 OUT_SUMMARY_FILE = "batch_eval_summary_multi.json"
 
 

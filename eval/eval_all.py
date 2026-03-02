@@ -23,6 +23,16 @@ import glob
 
 import csv
 
+# ====== control char cleanup ======
+_CTRL_RE = re.compile(r'[\x00-\x1f\x7f]')   # 包含 \x1f
+
+def clean_text(x):
+    """移除不可见控制字符，并做 strip。"""
+    if isinstance(x, str):
+        x = _CTRL_RE.sub('', x)
+        x = x.strip()
+    return x
+
 
 def auto_find_take_csv(takes_dir, timestamps_file):
     """
@@ -344,20 +354,20 @@ class PoseEvaluator:
         
     def read_csv_data(self):
         """读取CSV文件中的动捕数据"""
-        # 跳过前两行，没有表头
         df = pd.read_csv(self.csv_file, skiprows=2, header=None, low_memory=False)
-        # df = pd.read_csv(
-        #     CSV_FILE,
-        #     skiprows=2,
-        #     header=None,
-        #     low_memory=False,
-        #     encoding="latin1",          # 解决编码问题
-        #     encoding_errors="ignore"    # 遇到坏字节自动跳过
-        # )
+
+        # ✅ 只清洗 object 列（也就是字符串列），把 \x1f 这种控制字符去掉
+        obj_cols = df.select_dtypes(include=["object"]).columns
+        if len(obj_cols) > 0:
+            df[obj_cols] = df[obj_cols].applymap(clean_text)
+
+            # （可选但推荐）再把连续空白压成单空格，避免 'pink  cup'
+            df[obj_cols] = df[obj_cols].replace(r"\s+", " ", regex=True)
 
         print("CSV文件前几行:")
-        print(df.iloc[:10, :5])  # 打印前10行的前5列用于调试
+        print(df.iloc[:10, :5])
         return df
+
     
     def read_estimated_poses(self):
         """
@@ -368,27 +378,27 @@ class PoseEvaluator:
         # print("222222222222222222222222222222222222222222222222222222222222222222222222222222222222222")
         estimated_poses = {}
         segments = []
-        # segment = list(range(0, 5000))
-        # segments.append(segment)
+        segment = list(range(0, 5000))
+        segments.append(segment)
         
         # 读取分段信息
-        if os.path.exists(self.segment_file):
-            try:
-                with open(self.segment_file, 'r') as f:
-                    segments_data = json.load(f)
+        # if os.path.exists(self.segment_file):
+        #     try:
+        #         with open(self.segment_file, 'r') as f:
+        #             segments_data = json.load(f)
                 
-                # 从JSON解析分段
-                for segment_info in segments_data:
-                    start_frame = segment_info.get('start_frame', 0)
-                    end_frame = segment_info.get('end_frame', 0)
+        #         # 从JSON解析分段
+        #         for segment_info in segments_data:
+        #             start_frame = segment_info.get('start_frame', 0)
+        #             end_frame = segment_info.get('end_frame', 0)
                     
-                    if start_frame <= end_frame:
-                        segment = list(range(start_frame, end_frame + 1))
-                        segments.append(segment)
-                        print(f"添加评估段: 帧 {start_frame} 到 {end_frame} ({len(segment)} 帧)")
-            except Exception as e:
-                print(f"读取分段信息时出错: {e}")
-                segments = []
+        #             if start_frame <= end_frame:
+        #                 segment = list(range(start_frame, end_frame + 1))
+        #                 segments.append(segment)
+        #                 print(f"添加评估段: 帧 {start_frame} 到 {end_frame} ({len(segment)} 帧)")
+        #     except Exception as e:
+        #         print(f"读取分段信息时出错: {e}")
+        #         segments = []
         
         # 读取时间戳
         timestamps = {}
