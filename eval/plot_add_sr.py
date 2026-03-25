@@ -4,9 +4,9 @@
 Per-object *per-case* visualization of ADD / ADD-S success-rate (SR) curves.
 
 Your requirement:
-- CSV 中每三行代表同一个 case 的三种方法结果（3 methods）。
+- CSV 中每四行代表同一个 case 的四种方法结果（4 methods 包含 MidFusion）。
 - 不要把同一个物体的所有 case 平均掉。
-- 对每个物体的每个 case 画一张图：同一张图里叠加三种方法的曲线。
+- 对每个物体的每个 case 画一张图：同一张图里叠加四种方法的曲线。
 
 默认把 `dataset` 列作为 case 标识（你也可以用 --case_col 改成别的列）。
 

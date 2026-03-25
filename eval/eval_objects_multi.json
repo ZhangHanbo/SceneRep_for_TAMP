@@ -12,14 +12,14 @@
 
 "apple_bowl_2": {
     "3": "bowl",
-    "4": "apple"
+    "4": "apple1"
 },
 "apple_bowl_3": {
-    "3": "apple",
+    "3": "apple1",
     "4": "bowl"
 },
 "apple_bowl_4": {
-    "3": "apple",
+    "3": "apple1",
     "4": "bowl"
 },
 
@@ -41,33 +41,32 @@
 },
 
 "cup_bottle_basket_1": {
-    "1": "cup",
+    "1": "pink_cup",
     "2": "yellow_bottle",
     "3": "white_basket"
 },
 "cup_bottle_basket_2": {
     "2": "yellow_bottle",
-    "3": "cup",
+    "3": "pink_cup",
     "4": "white_basket"
 },
 "cup_bottle_basket_3": {
     "1": "yellow_bottle",
-    "4": "white_baskett"
+    "4": "white_basket"
 },
 "cup_bottle_basket_4": {
     "2": "yellow_bottle",
-    "3": "cup",
+    "3": "pink_cup",
     "4": "white_basket"
 },
 "cup_bottle_basket_5": {
-    "2": "cup",
+    "2": "pink_cup",
     "3": "yellow_bottle",
     "4": "white_basket"
 },
 
 "pink_cup_box_1": {
-    "2": "pink_cup",
-    "3": "wooden_box"
+    "2": "pink_cup"
 },
 "pink_cup_box_2": {
     "2": "pink_cup",

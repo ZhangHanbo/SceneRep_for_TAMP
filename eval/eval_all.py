@@ -153,6 +153,8 @@ class PoseEvaluator:
         self.eval_file = None
         self.foundation_file = None
         self.bundle_sdf_file = None
+        self.midfusion_file = None
+        self.tsdfpp_file = None
         self.eval_cam_file = os.path.join(self.dataset_dir, "eval", "camera.txt")
         self.segment_file = os.path.join(self.dataset_dir, "eval", "segments.json")
         self.base_file = os.path.join(self.dataset_dir, "pose_txt", "base_pose.txt")
@@ -210,6 +212,8 @@ class PoseEvaluator:
 
         self.foundation_poses = None
         self.bundle_sdf_poses = None
+        self.midfusion_poses = None
+        self.tsdfpp_poses = None
         
         # 坐标系转换矩阵（第一帧初始化）
         self.mocap_robot = np.loadtxt(self.mocap_robot_file)
@@ -248,58 +252,58 @@ class PoseEvaluator:
             print(f"Offset {offset:.4f}s 评估时出错: {e}")
             return float('inf')
     
-    def find_mocap_start_time_offset(self):
-        """
-        通过调整 mocap_start_time_offset 来最小化所有 segments 的总 add_sum
-        使用三分搜索（Ternary Search）找到最优的 offset 值
-        """
-        print("\n开始优化 mocap_start_time_offset（使用三分搜索）...")
+    # def find_mocap_start_time_offset(self):
+    #     """
+    #     通过调整 mocap_start_time_offset 来最小化所有 segments 的总 add_sum
+    #     使用三分搜索（Ternary Search）找到最优的 offset 值
+    #     """
+    #     print("\n开始优化 mocap_start_time_offset（使用三分搜索）...")
         
-        # 保存初始状态
-        original_first_flag = self.first_flag
-        original_obj_transformation = self.obj_transformation
-        original_camera_transformation = self.camera_transformation
+    #     # 保存初始状态
+    #     original_first_flag = self.first_flag
+    #     original_obj_transformation = self.obj_transformation
+    #     original_camera_transformation = self.camera_transformation
         
-        # 搜索范围
-        left = 0.05
-        right = 0.2
-        tolerance = 0.01  # 精度：0.001秒
+    #     # 搜索范围
+    #     left = 0.05
+    #     right = 0.2
+    #     tolerance = 0.01  # 精度：0.001秒
         
-        # 如果评估段太多，只使用第一个段来加速
-        segments_to_eval = self.evaluation_segments[:1] if len(self.evaluation_segments) > 1 else self.evaluation_segments
-        print(f"使用 {len(segments_to_eval)} 个评估段进行优化")
-        print(f"搜索范围: [{left:.3f}, {right:.3f}] 秒, 精度: {tolerance:.3f} 秒")
+    #     # 如果评估段太多，只使用第一个段来加速
+    #     segments_to_eval = self.evaluation_segments[:1] if len(self.evaluation_segments) > 1 else self.evaluation_segments
+    #     print(f"使用 {len(segments_to_eval)} 个评估段进行优化")
+    #     print(f"搜索范围: [{left:.3f}, {right:.3f}] 秒, 精度: {tolerance:.3f} 秒")
         
-        # 三分搜索
-        iteration = 0
-        while right - left > tolerance:
-            iteration += 1
-            m1 = left + (right - left) / 3
-            m2 = right - (right - left) / 3
+    #     # 三分搜索
+    #     iteration = 0
+    #     while right - left > tolerance:
+    #         iteration += 1
+    #         m1 = left + (right - left) / 3
+    #         m2 = right - (right - left) / 3
             
-            f1 = self._evaluate_offset(m1, segments_to_eval)
-            f2 = self._evaluate_offset(m2, segments_to_eval)
+    #         f1 = self._evaluate_offset(m1, segments_to_eval)
+    #         f2 = self._evaluate_offset(m2, segments_to_eval)
             
-            print(f"迭代 {iteration}: left={left:.4f}, m1={m1:.4f} (sum={f1:.4f}), m2={m2:.4f} (sum={f2:.4f}), right={right:.4f}")
+    #         print(f"迭代 {iteration}: left={left:.4f}, m1={m1:.4f} (sum={f1:.4f}), m2={m2:.4f} (sum={f2:.4f}), right={right:.4f}")
             
-            if f1 < f2:
-                right = m2
-            else:
-                left = m1
+    #         if f1 < f2:
+    #             right = m2
+    #         else:
+    #             left = m1
         
-        # 最终的最优值在 [left, right] 区间中点
-        best_offset = (left + right) / 2
-        best_add_sum = self._evaluate_offset(best_offset, segments_to_eval)
+    #     # 最终的最优值在 [left, right] 区间中点
+    #     best_offset = (left + right) / 2
+    #     best_add_sum = self._evaluate_offset(best_offset, segments_to_eval)
         
-        print(f"\n最优 offset: {best_offset:.4f}s, 最小 ADD sum: {best_add_sum:.4f} (共 {iteration} 次迭代)")
+    #     print(f"\n最优 offset: {best_offset:.4f}s, 最小 ADD sum: {best_add_sum:.4f} (共 {iteration} 次迭代)")
         
-        # 恢复状态并设置最优 offset
-        self.mocap_start_time_offset = best_offset
-        self.first_flag = original_first_flag
-        self.obj_transformation = original_obj_transformation
-        self.camera_transformation = original_camera_transformation
+    #     # 恢复状态并设置最优 offset
+    #     self.mocap_start_time_offset = best_offset
+    #     self.first_flag = original_first_flag
+    #     self.obj_transformation = original_obj_transformation
+    #     self.camera_transformation = original_camera_transformation
         
-        return best_offset
+    #     return best_offset
         
     
     def read_camera_poses(self):
@@ -604,6 +608,141 @@ class PoseEvaluator:
         
         return estimated_poses
 
+    def read_midfusion_poses(self):
+        """
+        1. 从 eval/segments.json 读取分段信息
+        2. 从 eval/object_X.txt 读取位姿数据
+        3. 从 pose_txt/timestamps.txt 读取时间戳
+        """
+        estimated_poses = {}        
+        # 读取时间戳
+        timestamps = {}
+        try:
+            with open(self.timestamp_file, 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 3:  # 帧号 秒 纳秒
+                        frame_idx = int(parts[0])
+                        secs = int(parts[1])
+                        nsecs = int(parts[2])
+                        timestamps[frame_idx] = (secs, nsecs)
+            print(f"从 {self.timestamp_file} 读取到 {len(timestamps)} 个时间戳")
+        except Exception as e:
+            print(f"读取时间戳文件时出错: {e}")
+            return {}
+        
+        # 读取姿态数据
+        if self.midfusion_file is None:
+            print("警告: midfusion_file 未设置，跳过读取姿态数据")
+            return {}
+        
+        try:
+            with open(self.midfusion_file, 'r') as f:
+                lines = f.readlines()
+                
+            for line in lines:
+                line = line.strip()
+                    
+                # 解析姿态数据: 帧号 x y z qx qy qz qw
+                parts = line.split()
+                if len(parts) < 8:
+                    print(f"警告: 行格式错误 '{line}'")
+                    continue
+                    
+                try:
+                    frame_idx = int(parts[0])
+                    position = np.array([float(parts[1]), float(parts[2]), float(parts[3])])
+                    quaternion = np.array([float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7])])
+                    
+                    # 获取时间戳
+                    timestamp = timestamps.get(frame_idx)
+
+                    # 构建4x4变换矩阵
+                    transform = np.eye(4)
+                    transform[:3, :3] = Rotation.from_quat(quaternion).as_matrix()
+                    transform[:3, 3] = position
+                    
+                    estimated_poses[frame_idx] = {
+                        'timestamp': timestamp,
+                        'transform': transform
+                    }
+                except (ValueError, IndexError) as e:
+                    print(f"解析行 '{line}' 时出错: {e}")
+            
+            print(f"从 {self.midfusion_file} 读取到 {len(estimated_poses)} 个姿态")
+        except Exception as e:
+            print(f"读取姿态文件时出错: {e}")
+        
+        return estimated_poses
+
+
+    def read_tsdfpp_poses(self):
+        """
+        1. 从 eval/segments.json 读取分段信息
+        2. 从 eval/object_X.txt 读取位姿数据
+        3. 从 pose_txt/timestamps.txt 读取时间戳
+        """
+        estimated_poses = {}        
+        # 读取时间戳
+        timestamps = {}
+        try:
+            with open(self.timestamp_file, 'r') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if len(parts) >= 3:  # 帧号 秒 纳秒
+                        frame_idx = int(parts[0])
+                        secs = int(parts[1])
+                        nsecs = int(parts[2])
+                        timestamps[frame_idx] = (secs, nsecs)
+            print(f"从 {self.timestamp_file} 读取到 {len(timestamps)} 个时间戳")
+        except Exception as e:
+            print(f"读取时间戳文件时出错: {e}")
+            return {}
+        
+        # 读取姿态数据
+        if self.tsdfpp_file is None:
+            print("警告: tsdfpp_file 未设置，跳过读取姿态数据")
+            return {}
+        
+        try:
+            with open(self.tsdfpp_file, 'r') as f:
+                lines = f.readlines()
+                
+            for line in lines:
+                line = line.strip()
+                    
+                # 解析姿态数据: 帧号 x y z qx qy qz qw
+                parts = line.split()
+                if len(parts) < 8:
+                    print(f"警告: 行格式错误 '{line}'")
+                    continue
+                    
+                try:
+                    frame_idx = int(parts[0])
+                    position = np.array([float(parts[1]), float(parts[2]), float(parts[3])])
+                    quaternion = np.array([float(parts[4]), float(parts[5]), float(parts[6]), float(parts[7])])
+                    
+                    # 获取时间戳
+                    timestamp = timestamps.get(frame_idx)
+
+                    # 构建4x4变换矩阵
+                    transform = np.eye(4)
+                    transform[:3, :3] = Rotation.from_quat(quaternion).as_matrix()
+                    transform[:3, 3] = position
+                    
+                    estimated_poses[frame_idx] = {
+                        'timestamp': timestamp,
+                        'transform': transform
+                    }
+                except (ValueError, IndexError) as e:
+                    print(f"解析行 '{line}' 时出错: {e}")
+            
+            print(f"从 {self.tsdfpp_file} 读取到 {len(estimated_poses)} 个姿态")
+        except Exception as e:
+            print(f"读取姿态文件时出错: {e}")
+        
+        return estimated_poses
+
 
         
     def find_nearest_mocap_idx(self, timestamp, last_nearest_idx=None):
@@ -885,6 +1024,86 @@ class PoseEvaluator:
         # np.savetxt(T_HB_FILE, T_hb)
         T_hb = np.loadtxt(T_HB_FILE)
         T_oc = np.linalg.inv(self.camera_poses[first_frame_idx]) @ self.estimated_poses[first_frame_idx]['transform']
+        T_cw = (self.mocap_robot @ mocap_head_pose @ np.linalg.inv(T_hb)) @ np.linalg.inv(self.base_poses[first_frame_idx]) @ self.camera_poses[first_frame_idx]
+        T_ow = T_cw @ T_oc
+
+        # print(f"estimated pose:\n{self.estimated_poses[first_frame_idx]['transform']}")
+        # print(f"camera pose:\n{self.camera_poses[first_frame_idx]}")
+        # print(f"T_cw:\n{T_cw}")
+        # print(f"T_ow:\n{T_ow}")
+
+
+        # 计算从动捕坐标系到估计坐标系的变换矩阵
+        # self.obj_transformation = np.linalg.inv(self.mocap_robot @ mocap_pose) @ self.estimated_poses[first_frame_idx]['transform']
+        # self.camera_transformation = np.linalg.inv(self.mocap_robot @ mocap_head_pose) @ self.camera_poses[first_frame_idx]
+        self.obj_transformation = np.linalg.inv(self.mocap_robot @ mocap_pose) @ T_ow
+        self.camera_transformation = np.linalg.inv(self.mocap_robot @ mocap_head_pose) @ T_cw
+        self.obj_points = self.get_point_cloud(first_frame_idx, T_cw)
+        self.obj_points = self.transform_points(self.obj_points, np.linalg.inv(T_ow))
+        # print(self.obj_points)
+        
+        
+        print(f"已计算转换矩阵:\n{self.obj_transformation, self.camera_transformation}")
+        return True
+
+    def compute_transformation_matrix_midfusion(self, first_frame_idx):
+        """计算动捕坐标系到估计坐标系的转换矩阵（使用第一帧）"""
+        # 获取第一帧的估计姿态
+        if first_frame_idx not in self.midfusion_poses:
+            print(f"错误: 找不到帧 {first_frame_idx} 的估计姿态")
+            return False
+        
+        # 获取对应的动捕真实姿态
+        nearest_idx, _ = self.find_nearest_mocap_idx(
+            self.midfusion_poses[first_frame_idx]['timestamp']
+        )
+        mocap_pose, mocap_head_pose = self.extract_mocap_pose(nearest_idx)
+
+        # T_hb = np.linalg.inv(self.base_poses[first_frame_idx]) @ self.mocap_robot @ mocap_head_pose
+        T_HB_FILE = "/home/wby/baselines/SR_TAMP/eval/transform_hb_matrix_apple1.txt"
+        # np.savetxt(T_HB_FILE, T_hb)
+        T_hb = np.loadtxt(T_HB_FILE)
+        T_oc = np.linalg.inv(self.camera_poses[first_frame_idx]) @ self.midfusion_poses[first_frame_idx]['transform']
+        T_cw = (self.mocap_robot @ mocap_head_pose @ np.linalg.inv(T_hb)) @ np.linalg.inv(self.base_poses[first_frame_idx]) @ self.camera_poses[first_frame_idx]
+        T_ow = T_cw @ T_oc
+
+        # print(f"estimated pose:\n{self.estimated_poses[first_frame_idx]['transform']}")
+        # print(f"camera pose:\n{self.camera_poses[first_frame_idx]}")
+        # print(f"T_cw:\n{T_cw}")
+        # print(f"T_ow:\n{T_ow}")
+
+
+        # 计算从动捕坐标系到估计坐标系的变换矩阵
+        # self.obj_transformation = np.linalg.inv(self.mocap_robot @ mocap_pose) @ self.estimated_poses[first_frame_idx]['transform']
+        # self.camera_transformation = np.linalg.inv(self.mocap_robot @ mocap_head_pose) @ self.camera_poses[first_frame_idx]
+        self.obj_transformation = np.linalg.inv(self.mocap_robot @ mocap_pose) @ T_ow
+        self.camera_transformation = np.linalg.inv(self.mocap_robot @ mocap_head_pose) @ T_cw
+        self.obj_points = self.get_point_cloud(first_frame_idx, T_cw)
+        self.obj_points = self.transform_points(self.obj_points, np.linalg.inv(T_ow))
+        # print(self.obj_points)
+        
+        
+        print(f"已计算转换矩阵:\n{self.obj_transformation, self.camera_transformation}")
+        return True
+
+    def compute_transformation_matrix_tsdfpp(self, first_frame_idx):
+        """计算动捕坐标系到估计坐标系的转换矩阵（使用第一帧）"""
+        # 获取第一帧的估计姿态
+        if first_frame_idx not in self.tsdfpp_poses:
+            print(f"错误: 找不到帧 {first_frame_idx} 的估计姿态")
+            return False
+        
+        # 获取对应的动捕真实姿态
+        nearest_idx, _ = self.find_nearest_mocap_idx(
+            self.tsdfpp_poses[first_frame_idx]['timestamp']
+        )
+        mocap_pose, mocap_head_pose = self.extract_mocap_pose(nearest_idx)
+
+        # T_hb = np.linalg.inv(self.base_poses[first_frame_idx]) @ self.mocap_robot @ mocap_head_pose
+        T_HB_FILE = "/home/wby/baselines/SR_TAMP/eval/transform_hb_matrix_apple1.txt"
+        # np.savetxt(T_HB_FILE, T_hb)
+        T_hb = np.loadtxt(T_HB_FILE)
+        T_oc = np.linalg.inv(self.camera_poses[first_frame_idx]) @ self.tsdfpp_poses[first_frame_idx]['transform']
         T_cw = (self.mocap_robot @ mocap_head_pose @ np.linalg.inv(T_hb)) @ np.linalg.inv(self.base_poses[first_frame_idx]) @ self.camera_poses[first_frame_idx]
         T_ow = T_cw @ T_oc
 
@@ -1244,7 +1463,7 @@ class PoseEvaluator:
         for frame_idx in segment:        
             # 获取估计姿态
             est_pose = self.estimated_poses[frame_idx]['transform']
-            foundation_pose = self.foundation_poses[frame_idx]['transform']
+            # foundation_pose = self.foundation_poses[frame_idx]['transform']
             
             # 获取对应的动捕真实姿态
             nearest_idx, _ = self.find_nearest_mocap_idx(
@@ -1270,10 +1489,220 @@ class PoseEvaluator:
             #     print(f"Open3D 可视化失败: {e}")
 
             # 获取点云
-            point_cloud = self.get_point_cloud(frame_idx, gt_cam_pose)
-            if point_cloud is None or len(point_cloud) < 10:  # 至少需要10个点
-                print(f"跳过帧 {frame_idx}: 点云无效")
-                continue
+            # point_cloud = self.get_point_cloud(frame_idx, gt_cam_pose)
+            # if point_cloud is None or len(point_cloud) < 10:  # 至少需要10个点
+            #     print(f"跳过帧 {frame_idx}: 点云无效")
+            #     continue
+            est_poses.append(est_pose)
+            mocap_poses.append(gt_obj_pose)
+            gt_cam_poses.append(gt_cam_pose)
+            est_cam_poses.append(est_cam_pose)
+
+            est_pose = np.linalg.inv(est_cam_pose) @ est_pose
+            gt_obj_pose = np.linalg.inv(gt_cam_pose) @ gt_obj_pose
+
+            # est_pose = foundation_pose
+            # gt_obj_pose = np.linalg.inv(gt_cam_pose) @ gt_obj_pose
+            
+            # 将点云转换到两个姿态下
+            # points_est = self.transform_points(point_cloud, est_pose @ np.linalg.inv(gt_cam_pose))
+            # points_mocap = self.transform_points(point_cloud, gt_obj_pose @ np.linalg.inv(gt_cam_pose))
+            points_est = self.transform_points(self.obj_points, est_pose)
+            points_mocap = self.transform_points(self.obj_points, gt_obj_pose)
+            # print(points_est)
+            # print(points_mocap)
+            
+            # 计算ADD和ADD-S
+            add_value = self.calculate_add(points_est, points_mocap)
+            adds_value = self.calculate_adds(points_est, points_mocap)
+            
+            results['add_values'].append(add_value)
+            results['adds_values'].append(adds_value)
+            results['total_frames'] += 1
+            results['frame_ids'].append(frame_idx)
+            
+            if add_value < self.add_threshold:
+                results['add_correct'] += 1
+            if adds_value < self.adds_threshold:
+                results['adds_correct'] += 1
+            
+            print(f"帧 {frame_idx}: ADD={add_value:.4f}, ADD-S={adds_value:.4f}")
+            add_sum += add_value
+        # 计算成功率
+        if results['total_frames'] > 0:
+            results['add_success_rate'] = results['add_correct'] / results['total_frames']
+            results['adds_success_rate'] = results['adds_correct'] / results['total_frames']
+            results['add_mean'] = np.mean(results['add_values'])
+            results['adds_mean'] = np.mean(results['adds_values'])
+
+        # self.visualize_poses(est_poses, mocap_poses, gt_cam_poses, est_cam_poses)
+        
+        return results, add_sum
+
+    def evaluate_segment_midfusion(self, segment):
+        """评估一个时间段内的姿态估计"""
+        # 使用第一帧计算坐标系转换矩阵
+        first_frame_idx = segment[0]
+        nearest_idx = None
+        if self.first_flag == False:
+            self.compute_transformation_matrix_midfusion(first_frame_idx)
+            # self.compute_transformation_matrix()
+            # self.first_flag = True
+            # 非实时模式：无需初始化持久化窗口
+            
+        results = {
+            'frame_ids': [],
+            'add_values': [],
+            'adds_values': [],
+            'add_correct': 0,
+            'adds_correct': 0,
+            'total_frames': 0
+        }
+
+        est_poses = []
+        mocap_poses = []
+        gt_cam_poses = []
+        est_cam_poses = []
+        add_sum = 0
+        
+        for frame_idx in segment:        
+            # 获取估计姿态
+            est_pose = self.midfusion_poses[frame_idx]['transform']
+            # foundation_pose = self.foundation_poses[frame_idx]['transform']
+            
+            # 获取对应的动捕真实姿态
+            nearest_idx, _ = self.find_nearest_mocap_idx(
+                self.midfusion_poses[frame_idx]['timestamp'], nearest_idx
+            )
+            mocap_obj_pose, mocap_cam_pose = self.extract_mocap_pose(nearest_idx)
+                
+            # 将动捕姿态转换到估计坐标系
+            gt_obj_pose = self.mocap_robot @ mocap_obj_pose @ self.obj_transformation
+            gt_cam_pose = self.mocap_robot @ mocap_cam_pose @ self.camera_transformation
+            # gt_obj_pose = self.mocap_robot @ mocap_obj_pose
+            # gt_cam_pose = self.mocap_robot @ mocap_cam_pose
+            est_cam_pose = self.camera_poses[frame_idx]
+            # gt_obj_pose = self.mocap_robot @ mocap_obj_pose
+            # gt_cam_pose = self.mocap_robot @ mocap_cam_pose
+            # print(est_pose, "\n", self.mocap_robot @ mocap_obj_pose, "\n", gt_obj_pose)
+
+            # Open3D 逐帧可视化：每帧弹窗一次，关闭后继续
+            # try:
+            #     if frame_idx > -1: self.visualize_frame_open3d(np.eye(4), gt_cam_pose, self.camera_poses[frame_idx], gt_obj_pose, est_pose)
+            #     print(gt_obj_pose, "\n", est_pose)
+            # except Exception as e:
+            #     print(f"Open3D 可视化失败: {e}")
+
+            # 获取点云
+            # point_cloud = self.get_point_cloud(frame_idx, gt_cam_pose)
+            # if point_cloud is None or len(point_cloud) < 10:  # 至少需要10个点
+            #     print(f"跳过帧 {frame_idx}: 点云无效")
+            #     continue
+            est_poses.append(est_pose)
+            mocap_poses.append(gt_obj_pose)
+            gt_cam_poses.append(gt_cam_pose)
+            est_cam_poses.append(est_cam_pose)
+
+            est_pose = np.linalg.inv(est_cam_pose) @ est_pose
+            gt_obj_pose = np.linalg.inv(gt_cam_pose) @ gt_obj_pose
+
+            # est_pose = foundation_pose
+            # gt_obj_pose = np.linalg.inv(gt_cam_pose) @ gt_obj_pose
+            
+            # 将点云转换到两个姿态下
+            # points_est = self.transform_points(point_cloud, est_pose @ np.linalg.inv(gt_cam_pose))
+            # points_mocap = self.transform_points(point_cloud, gt_obj_pose @ np.linalg.inv(gt_cam_pose))
+            points_est = self.transform_points(self.obj_points, est_pose)
+            points_mocap = self.transform_points(self.obj_points, gt_obj_pose)
+            # print(points_est)
+            # print(points_mocap)
+            
+            # 计算ADD和ADD-S
+            add_value = self.calculate_add(points_est, points_mocap)
+            adds_value = self.calculate_adds(points_est, points_mocap)
+            
+            results['add_values'].append(add_value)
+            results['adds_values'].append(adds_value)
+            results['total_frames'] += 1
+            results['frame_ids'].append(frame_idx)
+            
+            if add_value < self.add_threshold:
+                results['add_correct'] += 1
+            if adds_value < self.adds_threshold:
+                results['adds_correct'] += 1
+            
+            print(f"帧 {frame_idx}: ADD={add_value:.4f}, ADD-S={adds_value:.4f}")
+            add_sum += add_value
+        # 计算成功率
+        if results['total_frames'] > 0:
+            results['add_success_rate'] = results['add_correct'] / results['total_frames']
+            results['adds_success_rate'] = results['adds_correct'] / results['total_frames']
+            results['add_mean'] = np.mean(results['add_values'])
+            results['adds_mean'] = np.mean(results['adds_values'])
+
+        # self.visualize_poses(est_poses, mocap_poses, gt_cam_poses, est_cam_poses)
+        
+        return results, add_sum
+
+    def evaluate_segment_tsdfpp(self, segment):
+        """评估一个时间段内的姿态估计"""
+        # 使用第一帧计算坐标系转换矩阵
+        first_frame_idx = segment[0]
+        nearest_idx = None
+        if self.first_flag == False:
+            self.compute_transformation_matrix_tsdfpp(first_frame_idx)
+            # self.compute_transformation_matrix()
+            # self.first_flag = True
+            # 非实时模式：无需初始化持久化窗口
+            
+        results = {
+            'frame_ids': [],
+            'add_values': [],
+            'adds_values': [],
+            'add_correct': 0,
+            'adds_correct': 0,
+            'total_frames': 0
+        }
+
+        est_poses = []
+        mocap_poses = []
+        gt_cam_poses = []
+        est_cam_poses = []
+        add_sum = 0
+        
+        for frame_idx in segment:        
+            # 获取估计姿态
+            est_pose = self.tsdfpp_poses[frame_idx]['transform']
+            # foundation_pose = self.foundation_poses[frame_idx]['transform']
+            
+            # 获取对应的动捕真实姿态
+            nearest_idx, _ = self.find_nearest_mocap_idx(
+                self.tsdfpp_poses[frame_idx]['timestamp'], nearest_idx
+            )
+            mocap_obj_pose, mocap_cam_pose = self.extract_mocap_pose(nearest_idx)
+                
+            # 将动捕姿态转换到估计坐标系
+            gt_obj_pose = self.mocap_robot @ mocap_obj_pose @ self.obj_transformation
+            gt_cam_pose = self.mocap_robot @ mocap_cam_pose @ self.camera_transformation
+            # gt_obj_pose = self.mocap_robot @ mocap_obj_pose
+            # gt_cam_pose = self.mocap_robot @ mocap_cam_pose
+            est_cam_pose = self.camera_poses[frame_idx]
+            # gt_obj_pose = self.mocap_robot @ mocap_obj_pose
+            # gt_cam_pose = self.mocap_robot @ mocap_cam_pose
+            # print(est_pose, "\n", self.mocap_robot @ mocap_obj_pose, "\n", gt_obj_pose)
+
+            # Open3D 逐帧可视化：每帧弹窗一次，关闭后继续
+            # try:
+            #     if frame_idx > -1: self.visualize_frame_open3d(np.eye(4), gt_cam_pose, self.camera_poses[frame_idx], gt_obj_pose, est_pose)
+            #     print(gt_obj_pose, "\n", est_pose)
+            # except Exception as e:
+            #     print(f"Open3D 可视化失败: {e}")
+
+            # 获取点云
+            # point_cloud = self.get_point_cloud(frame_idx, gt_cam_pose)
+            # if point_cloud is None or len(point_cloud) < 10:  # 至少需要10个点
+            #     print(f"跳过帧 {frame_idx}: 点云无效")
+            #     continue
             est_poses.append(est_pose)
             mocap_poses.append(gt_obj_pose)
             gt_cam_poses.append(gt_cam_pose)
@@ -1372,10 +1801,10 @@ class PoseEvaluator:
             #     print(f"Open3D 可视化失败: {e}")
 
             # 获取点云
-            point_cloud = self.get_point_cloud(frame_idx, gt_cam_pose)
-            if point_cloud is None or len(point_cloud) < 10:  # 至少需要10个点
-                print(f"跳过帧 {frame_idx}: 点云无效")
-                continue
+            # point_cloud = self.get_point_cloud(frame_idx, gt_cam_pose)
+            # if point_cloud is None or len(point_cloud) < 10:  # 至少需要10个点
+            #     print(f"跳过帧 {frame_idx}: 点云无效")
+            #     continue
             est_poses.append(est_pose)
             mocap_poses.append(gt_obj_pose)
             gt_cam_poses.append(gt_cam_pose)
@@ -1474,10 +1903,10 @@ class PoseEvaluator:
             #     print(f"Open3D 可视化失败: {e}")
 
             # 获取点云
-            point_cloud = self.get_point_cloud(frame_idx, gt_cam_pose)
-            if point_cloud is None or len(point_cloud) < 10:  # 至少需要10个点
-                print(f"跳过帧 {frame_idx}: 点云无效")
-                continue
+            # point_cloud = self.get_point_cloud(frame_idx, gt_cam_pose)
+            # if point_cloud is None or len(point_cloud) < 10:  # 至少需要10个点
+            #     print(f"跳过帧 {frame_idx}: 点云无效")
+            #     continue
             est_poses.append(est_pose)
             mocap_poses.append(gt_obj_pose)
             gt_cam_poses.append(gt_cam_pose)
@@ -1605,6 +2034,12 @@ class PoseEvaluator:
         self.bundle_sdf_file = os.path.join(
             self.dataset_dir, "eval_bundlesdf_comp", f"object_{object_id}.txt"
         )
+        self.midfusion_file = os.path.join(
+            self.dataset_dir, "eval_midfusion", f"object_{object_id}.txt"
+        )
+        self.tsdfpp_file = os.path.join(
+            self.dataset_dir, "eval_tsdfpp_comp", f"object_{object_id}.txt"
+        )
 
         # 清缓存
         if hasattr(self, 'obj_cols'):
@@ -1618,6 +2053,8 @@ class PoseEvaluator:
         self.estimated_poses, self.evaluation_segments = self.read_estimated_poses()
         self.foundation_poses = self.read_foundation_poses()
         self.bundle_sdf_poses = self.read_bundle_sdf_poses()
+        self.midfusion_poses = self.read_midfusion_poses()
+        self.tsdfpp_poses = self.read_tsdfpp_poses()
 
         print(f"评估对象: {object_name} (ID: {object_id})")
         print(f"使用评估文件: {self.eval_file}")
@@ -1630,6 +2067,8 @@ class PoseEvaluator:
         all_results_ours = []
         all_results_fp = []
         all_results_bs = []
+        all_results_mid = []
+        all_results_tp = []
 
         total_dropped = 0
 
@@ -1646,6 +2085,12 @@ class PoseEvaluator:
             self.first_flag = False
             res_bs, _ = self.evaluate_segment_bundle_sdf(segment)
 
+            self.first_flag = False
+            res_mid, _ = self.evaluate_segment_midfusion(segment)
+
+            self.first_flag = False
+            res_tp, _ = self.evaluate_segment_tsdfpp(segment)
+
             if not res_ours or not res_fp or not res_bs:
                 continue
 
@@ -1661,6 +2106,8 @@ class PoseEvaluator:
                 res_ours = self._filter_results_by_bad_frames(res_ours, bad_frames)
                 res_fp   = self._filter_results_by_bad_frames(res_fp, bad_frames)
                 res_bs   = self._filter_results_by_bad_frames(res_bs, bad_frames)
+                res_mid  = self._filter_results_by_bad_frames(res_mid, bad_frames)
+                res_tp   = self._filter_results_by_bad_frames(res_tp, bad_frames)
 
             if res_ours:
                 all_results_ours.append(res_ours)
@@ -1668,6 +2115,10 @@ class PoseEvaluator:
                 all_results_fp.append(res_fp)
             if res_bs:
                 all_results_bs.append(res_bs)
+            if res_mid:
+                all_results_mid.append(res_mid)
+            if res_tp:
+                all_results_tp.append(res_tp)
 
         print(f"\n[DROP] 全部 segments 总共丢弃帧数: {total_dropped}")
 
@@ -1711,8 +2162,14 @@ class PoseEvaluator:
         bs_summary = self.aggregate_results(
             object_id, object_name, "BundleSDF", all_results_bs
         )
+        mid_summary = self.aggregate_results(
+            object_id, object_name, "MidFusion", all_results_mid
+        )
+        tp_summary = self.aggregate_results(
+            object_id, object_name, "TSDF++", all_results_tp
+        )
 
-        rows.extend([ours_summary, fp_summary, bs_summary])
+        rows.extend([ours_summary, fp_summary, bs_summary, mid_summary, tp_summary])
 
         # ========== 写 CSV ==========
         self.save_results_csv(rows)
