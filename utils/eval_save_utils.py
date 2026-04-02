@@ -14,7 +14,7 @@ class ObjectPoseRecorder:
         """
         self.pose_dir = os.path.join(base_dir, "pose_txt")
         # self.eval_dir = os.path.join(base_dir, "eval")
-        self.eval_dir = os.path.join(base_dir, "eval_demo")
+        self.eval_dir = os.path.join(base_dir, "eval")
         os.makedirs(self.pose_dir, exist_ok=True)
         os.makedirs(self.eval_dir, exist_ok=True)
         for filename in os.listdir(self.eval_dir):

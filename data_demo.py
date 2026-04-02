@@ -365,7 +365,8 @@ def run_single_dataset(DATASET_PATH, config):
             )
         
         # 只有在上一帧skip_fusion为True，这一帧skip_fusion为False的时候，should_refine_cam_pose才为True
-        should_refine_cam_pose = skip_fusion_prev and not skip_fusion
+        # should_refine_cam_pose = skip_fusion_prev and not skip_fusion
+        should_refine_cam_pose = True
         T_cw_prev = T_cw.copy()
 
         hand_mask = generate_hand_mask(T_ec, K, depth.shape, T_lfc, T_rfc, T_joints, depth=depth)
@@ -514,8 +515,8 @@ def run_single_dataset(DATASET_PATH, config):
         else:
             pose_ok = True
 
-        if idx == 2:
-            should_refine_cam_pose = True
+        # if idx == 2:
+        #     should_refine_cam_pose = True
         
         if pose_ref_cfg.get('enabled', False) and objects and not skip_fusion and should_refine_cam_pose:
             # print("camera pose refinement start")

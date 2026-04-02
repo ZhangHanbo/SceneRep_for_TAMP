@@ -34,7 +34,7 @@ python rosbag2dataset/sam/sam.py [dataname]
 
 ## Demo
 
-1. Download demo data from huggingface 
+1. Download demo data from huggingface： [Mobile_Manipulation_on_Fetch](https://huggingface.co/datasets/wby031018/Mobile_Manipulation_on_Fetch)
 2. Edit file path in config file: configs/demo.yaml
 3. Run:
 ```bash

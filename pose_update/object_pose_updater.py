@@ -509,6 +509,11 @@ def update_obj_pose_icp(
         # )
 
         T_delta = reg.transformation  # source → target
+        R = T_delta[:3, :3]
+        angle = np.arccos(np.clip((np.trace(R) - 1)/2, -1, 1))
+        if angle > np.deg2rad(10):
+            print(f"[ICP] 旋转过大，跳过ICP，angle={np.rad2deg(angle):.2f} deg")
+            return True
         # T_delta = clamp_rotation(T_delta, max_deg=10.0)
         # print("[update_obj_pose_icp] ICP T_delta=\n", T_delta)
         print(f"[ICP] fitness={reg.fitness:.8f}, rmse={reg.inlier_rmse:.8f}")
