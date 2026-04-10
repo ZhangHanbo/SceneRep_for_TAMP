@@ -12,3 +12,4 @@ __pycache__/
 .Python
 *.egg-info/
 .pytest_cache/
+*.png
