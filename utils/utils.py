@@ -7,10 +7,19 @@ from scipy.spatial.transform import Rotation
 
 from typing import Dict, List, Tuple, Optional, Union
 
-import rospy
-from sensor_msgs.msg import Image as ImageMsg
-from geometry_msgs.msg import Pose, PoseStamped
-from cv_bridge import CvBridge, CvBridgeError
+try:
+    import rospy
+    from sensor_msgs.msg import Image as ImageMsg
+    from geometry_msgs.msg import Pose, PoseStamped
+    from cv_bridge import CvBridge, CvBridgeError
+    ROS_AVAILABLE = True
+except ImportError:
+    ROS_AVAILABLE = False
+    # Stub types so function signatures don't crash at import time
+    Pose = PoseStamped = ImageMsg = CvBridgeError = None
+    class _CvBridgeStub:
+        pass
+    CvBridge = _CvBridgeStub
 
 # -------------------------- util ---------------------------------
 def load_pose_txt_line(txt_path: str, idx: int) -> np.ndarray:
@@ -47,7 +56,7 @@ def decode_mask(b64: str, hw: tuple[int, int]) -> np.ndarray:
 
 # ros version helpers
 
-bridge = CvBridge()
+bridge = CvBridge() if ROS_AVAILABLE else None
 
 def pose_to_mat(p: Pose) -> np.ndarray:
     T = np.eye(4, dtype=np.float64)
