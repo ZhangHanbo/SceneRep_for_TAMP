@@ -162,59 +162,144 @@ def compute_spatial_relations(objects: List[SceneObject],
                 obj2.child_objs[obj1_id] = np.linalg.inv(obj2.pose_cur) @ obj1.pose_cur
     return relations
 
+def compute_spatial_relations_with_scores(
+        objects: List[SceneObject],
+        tolerance: float = 0.02,
+        overlap_threshold: float = 0.3,
+) -> tuple[Dict[int, Dict[str, List[int]]], Dict[tuple[int, int, str], float]]:
+    """Same as compute_spatial_relations but also returns per-edge soft scores.
+
+    Returns:
+        relations: identical to `compute_spatial_relations()` output.
+        scores:    dict keyed by (parent_id, child_id, relation_type) ∈
+                   {'on', 'in', 'under', 'contain'} with overlap-ratio score in [0, 1].
+                   Only entries above the detection threshold are present —
+                   plus their symmetric complements (e.g., "A on B" has score s
+                   and the matching "B under A" has the same score s).
+
+    This is a thin wrapper that reuses bounding-box computation from
+    `compute_spatial_relations` and the soft variant of the relation detector.
+    Factor-graph consumers should read scores here; legacy callers can keep
+    using the boolean relations.
+    """
+    # First get the legacy relations via the existing routine (ensures parity)
+    relations = compute_spatial_relations(objects, tolerance=tolerance,
+                                           overlap_threshold=0.0)
+
+    # Recompute scores in a second pass. We do not trust the existing
+    # structure alone because it discards the overlap ratio.
+    # Build bounding boxes in the same way as compute_spatial_relations does.
+    scores: Dict[tuple[int, int, str], float] = {}
+
+    object_boxes = {}
+    for obj in objects:
+        if hasattr(obj, '_points') and len(obj._points) > 0:
+            pts = obj._points.copy()
+            min_corner, max_corner = compute_bounding_box(pts)
+            object_boxes[obj.id] = (min_corner, max_corner)
+
+    # Reset relations and rebuild using soft scores + threshold
+    for oid in relations:
+        relations[oid] = {"in": [], "on": [], "under": [], "contain": []}
+
+    ids = [o.id for o in objects if o.id in object_boxes]
+    for i_id in ids:
+        box1_min, box1_max = object_boxes[i_id]
+        for j_id in ids:
+            if i_id == j_id:
+                continue
+            box2_min, box2_max = object_boxes[j_id]
+            is_in, is_on, s_in, s_on = detect_spatial_relation_with_scores(
+                box1_min, box1_max, box2_min, box2_max,
+                tolerance, overlap_threshold)
+            if is_in:
+                relations[i_id]["in"].append(j_id)
+                relations[j_id]["contain"].append(i_id)
+                scores[(i_id, j_id, "in")] = s_in
+                scores[(j_id, i_id, "contain")] = s_in
+            elif is_on:
+                relations[i_id]["on"].append(j_id)
+                relations[j_id]["under"].append(i_id)
+                scores[(i_id, j_id, "on")] = s_on
+                scores[(j_id, i_id, "under")] = s_on
+    return relations, scores
+
+
 def detect_spatial_relation(box1_min: np.ndarray, box1_max: np.ndarray,
                            box2_min: np.ndarray, box2_max: np.ndarray,
                            tolerance: float, overlap_threshold: float) -> tuple[bool, bool]:
     """
     检测两个物体之间的空间关系
-    
+
     新的判断逻辑：
     1. 首先xy面积重叠比例要在阈值以上（以面积更小的为分母）
     2. 如果面积小的z max高于面积大的z max，就是on关系
     3. 否则就是in关系（面积大的contain面积小的）
     4. 另外如果面积小的z min小于面积大的z min，就是面积大的on面积小的（很少见）
-    
+
     返回: (is_in, is_on) 元组
     """
-    # 计算x-y平面的重叠面积
+    is_in, is_on, _, _ = detect_spatial_relation_with_scores(
+        box1_min, box1_max, box2_min, box2_max, tolerance, overlap_threshold)
+    return is_in, is_on
+
+
+def detect_spatial_relation_with_scores(
+        box1_min: np.ndarray, box1_max: np.ndarray,
+        box2_min: np.ndarray, box2_max: np.ndarray,
+        tolerance: float, overlap_threshold: float
+) -> tuple[bool, bool, float, float]:
+    """Relation detection that also returns the soft scores driving the decision.
+
+    Returns:
+        (is_in, is_on, score_in, score_on) — the booleans match
+        `detect_spatial_relation()`, and the scores are in [0, 1]:
+          * score_in:  overlap_ratio gated by the z-containment condition
+          * score_on:  overlap_ratio gated by the z-stacking condition
+        A relation is considered "active" in boolean form iff its score
+        exceeds overlap_threshold AND the geometric type check passes.
+        Downstream optimization can use the raw scores (even below
+        threshold) to weight factor noise per Task 6.
+    """
+    # XY-plane overlap area
     x_overlap = max(0, min(box1_max[0], box2_max[0]) - max(box1_min[0], box2_min[0]))
     y_overlap = max(0, min(box1_max[1], box2_max[1]) - max(box1_min[1], box2_min[1]))
-    
+
     overlap_area = x_overlap * y_overlap
     box1_area = (box1_max[0] - box1_min[0]) * (box1_max[1] - box1_min[1])
     box2_area = (box2_max[0] - box2_min[0]) * (box2_max[1] - box2_min[1])
-    
-    # 重叠比例应该超过阈值（以面积更小的为分母）
+
     min_area = min(box1_area, box2_area)
     if min_area <= 0:
-        return False, False
-    
-    overlap_ratio = overlap_area / min_area
-    if overlap_ratio < overlap_threshold:
-        return False, False
-    
-    # 判断关系类型
-    is_on = False
-    is_in = False
-    
-    # 情况1：面积小的z max高于面积大的z max（常见情况）
+        return False, False, 0.0, 0.0
+
+    overlap_ratio = float(overlap_area / min_area)
+
+    # Z-axis type checks (same logic as legacy)
+    type_is_on = False
+    type_is_in = False
     if box1_area <= box2_area:
-        # box1面积更小，检查box1的z max是否高于box2的z max
         if box1_max[2] > box2_max[2]:
-            is_on = True
+            type_is_on = True
     else:
-        # box2面积更小，检查box2的z max是否高于box1的z max
         if box2_min[2] < box1_min[2]:
-            is_on = True
-    
-    # 情况2：面积小的z min小于面积大的z min（很少见的情况）
-    if not is_on:  # 如果还没确定是on关系，继续检查
+            type_is_on = True
+
+    if not type_is_on:
         if box1_area <= box2_area:
-            # box1面积更小，检查box1的z min是否小于box2的z min
             if box1_max[2] < box2_max[2]:
-                is_in = True
-    
-    return is_in, is_on
+                type_is_in = True
+
+    # Soft scores: overlap ratio gated by the geometric type test.
+    # If the type doesn't apply, the score is 0 (not just low).
+    score_on = overlap_ratio if type_is_on else 0.0
+    score_in = overlap_ratio if type_is_in else 0.0
+
+    # Legacy boolean decision
+    is_on = type_is_on and overlap_ratio >= overlap_threshold
+    is_in = type_is_in and overlap_ratio >= overlap_threshold
+
+    return is_in, is_on, score_in, score_on
 
 
 def print_relations(relations: Dict[int, Dict[str, List[int]]], objects: List[SceneObject]) -> None:

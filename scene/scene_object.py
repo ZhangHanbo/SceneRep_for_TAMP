@@ -115,13 +115,30 @@ class SceneObject:
         self.to_be_rebuild = False # whether to rebuild the object
         self.to_be_repaint = True
 
-        self.pose_uncertain = False
+        # Legacy boolean kept for backward compatibility with existing code.
+        # New code should read `self.pose_cov` / use `pose_entropy` instead.
+        self._pose_uncertain_legacy = False
+
         self.latest_observation_pts = np.empty((0, 3), np.float32)
         self.latest_observation_cls = np.empty((0, 3), np.float32)
         self.latest_observation_pose = None
 
         self.child_objs = {} # child objects: list of [id, relative_pose] where relative_pose is 4x4 transformation matrix
         self.parent_obj_id = None
+
+        # ––– EKF state (Task 2) ––––––––––––––––––––––––––––––––––––––– #
+        # Pose covariance in se(3) tangent space, ordering [v, ω].
+        # Initialized loose; shrinks as observations accumulate.
+        self.pose_cov = np.eye(6, dtype=np.float64) * 0.01
+
+        # Beta-Bernoulli posterior per label: {label: (alpha, beta)}.
+        # MAP label = argmax α/(α+β). Replaces the raw score sum for label
+        # decisions, while _score_sum is kept for backward compatibility.
+        self.label_belief: Dict[str, Tuple[float, float]] = {}
+
+        # Count of consecutive frames without a successful observation —
+        # used by process_noise_for_phase to schedule decay.
+        self.frames_since_observation: int = 0
 
 
     # --------------------------------------------------------------------- #
@@ -146,19 +163,59 @@ class SceneObject:
         """Shallow copy of the raw detection list."""
         return self.detections.copy()
 
+    @property
+    def pose_uncertain(self) -> bool:
+        """Legacy boolean API. Now derived from covariance entropy.
+
+        Returns True if the object's pose covariance exceeds the default
+        threshold, OR if the legacy boolean has been explicitly set by
+        older code paths (e.g., `obj.pose_uncertain = True`).
+        """
+        if self._pose_uncertain_legacy:
+            return True
+        from pose_update.ekf_se3 import pose_is_uncertain
+        return pose_is_uncertain(self.pose_cov)
+
+    @pose_uncertain.setter
+    def pose_uncertain(self, value: bool) -> None:
+        """Setter retained for backward compatibility. Setting True inflates
+        the covariance so downstream readers see an uncertain pose."""
+        self._pose_uncertain_legacy = bool(value)
+        if value:
+            # Inflate covariance so any new reader agrees
+            self.pose_cov = np.eye(6, dtype=np.float64) * 0.1
+
     # --------------------------------------------------------------------- #
     #  Core API
     # --------------------------------------------------------------------- #
     # ––– 1. record a new detection –––––––––––––––––––––––––––––––––––– #
     def add_detection(self, label: str, score: float) -> None:
-        """Append a new observation and update the label tally."""
-        self.detections.append((label, float(score)))
-        self._score_sum[label] += float(score)
+        """Append a new observation and update the label tally.
+
+        Maintains two parallel mechanisms for backward compatibility:
+          * _score_sum  — raw cumulative score (legacy).
+          * label_belief — Beta-Bernoulli posterior per label (new).
+        The MAP label is determined by the Beta-Bernoulli posterior
+        (α/(α+β)) rather than the raw sum so that a confident "bowl"
+        beats many low-confidence "cup" detections.
+        """
+        score_f = float(score)
+        self.detections.append((label, score_f))
+        self._score_sum[label] += score_f
         self._count += 1
 
-        # update arg-max
-        self._label = max(self._score_sum.items(), key=lambda kv: kv[1])[0]
-        self._score = self._score_sum[self._label] / max(1, self._count)
+        # Beta-Bernoulli update (Task 2b)
+        from pose_update.ekf_se3 import update_label_belief
+        self.label_belief, map_label = update_label_belief(
+            self.label_belief, label, score_f)
+
+        # Legacy: also keep arg-max of raw score sums available.
+        raw_map = max(self._score_sum.items(), key=lambda kv: kv[1])[0]
+
+        # Prefer the calibrated MAP from Beta-Bernoulli.
+        self._label = map_label
+        alpha, beta = self.label_belief[map_label]
+        self._score = alpha / (alpha + beta)
 
     # ––– 2. add raw points (world frame) –––––––––––––––––––––––––––––– #
     def add_points(
