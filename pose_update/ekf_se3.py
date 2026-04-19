@@ -121,19 +121,91 @@ def se3_adjoint(T: np.ndarray) -> np.ndarray:
 # ─────────────────────────────────────────────────────────────────────
 
 def ekf_predict(T: np.ndarray, cov: np.ndarray,
-                Q: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+                Q: np.ndarray,
+                P_max: Optional[np.ndarray] = None
+                ) -> Tuple[np.ndarray, np.ndarray]:
     """Prediction step with process noise Q added to covariance.
 
     Args:
         T:   (4, 4) SE(3) prior mean.
         cov: (6, 6) prior covariance in se(3).
         Q:   (6, 6) process noise covariance.
+        P_max: optional (6, 6) covariance-saturation cap. When provided, the
+               projector Phi of bernoulli_ekf.tex eq. (eq:phi) is applied
+               after Q is added: P_out <- min(1, tr(P_max)/tr(P)) * P.
+               Preserves symmetry and positive-definiteness; caps the trace
+               at tr(P_max). When None (default), no cap is applied
+               — the recursion matches the pre-Bernoulli behaviour.
 
     Returns:
         (T_pred, cov_pred) — mean unchanged (constant-velocity zero prior),
-        covariance inflated by Q.
+        covariance inflated by Q and optionally saturated.
     """
-    return T.copy(), cov + Q
+    cov_pred = cov + Q
+    if P_max is not None:
+        cov_pred = saturate_covariance(cov_pred, P_max)
+    return T.copy(), cov_pred
+
+
+def saturate_covariance(P: np.ndarray, P_max: np.ndarray) -> np.ndarray:
+    """Covariance-saturation projector Phi from bernoulli_ekf.tex eq. (eq:phi).
+
+        Phi(P) = min(1, tr(P_max) / tr(P)) * P.
+
+    Scales P down uniformly so that tr(P) <= tr(P_max), preserving symmetry
+    and positive-(semi-)definiteness. Acts as an additive static prior with
+    total spread bounded by tr(P_max): the recursion is self-bounded under
+    arbitrarily long missing-observation streaks.
+
+    Args:
+        P:     (6, 6) symmetric positive-semidefinite covariance.
+        P_max: (6, 6) symmetric positive-definite cap. Only its trace is
+               consulted, but callers should keep it PD so the design
+               intent matches the equation.
+
+    Returns:
+        (6, 6) saturated covariance.
+    """
+    tr_P = float(np.trace(P))
+    tr_Pmax = float(np.trace(P_max))
+    if tr_P <= tr_Pmax or tr_P <= 0.0:
+        return P
+    scale = tr_Pmax / tr_P
+    return scale * P
+
+
+def huber_weight(d2: float,
+                 G_in: float = 12.59,
+                 G_out: float = 25.0) -> float:
+    """Huber redescending M-estimator weight on a Mahalanobis squared
+    residual; bernoulli_ekf.tex eq. (eq:huber).
+
+        w = 1                     if d2 <= G_in
+        w = sqrt(G_in / d2)       if G_in < d2 <= G_out
+        w = 0                     if d2 > G_out
+
+    The inner gate G_in is the chi^2_6(0.95) quantile (~12.59), the outer
+    gate G_out is chi^2_6(0.9997) (~25). A caller with an observation of
+    weight w scales its measurement noise by 1/w so the Kalman gain shrinks
+    smoothly with |d|. w = 0 signals an outer-gate reject: the update is
+    skipped and the measurement is routed to the unassigned branch of the
+    Bernoulli update.
+
+    Args:
+        d2:    Mahalanobis squared distance (scalar).
+        G_in:  inner-gate chi^2 quantile.
+        G_out: outer-gate chi^2 quantile.
+
+    Returns:
+        scalar weight in [0, 1].
+    """
+    if not np.isfinite(d2) or d2 < 0.0:
+        return 0.0
+    if d2 <= G_in:
+        return 1.0
+    if d2 <= G_out:
+        return float(np.sqrt(G_in / d2))
+    return 0.0
 
 
 def ekf_update(T_prior: np.ndarray, cov_prior: np.ndarray,

@@ -30,7 +30,7 @@ from typing import Callable, Dict, List, Optional
 import numpy as np
 
 from pose_update.ekf_se3 import (
-    se3_exp, se3_log, se3_adjoint, ekf_predict,
+    se3_exp, se3_log, se3_adjoint, ekf_predict, saturate_covariance,
 )
 from pose_update.slam_interface import (
     PoseEstimate, ParticlePose,
@@ -212,11 +212,16 @@ class RBPFState:
     #  Predict
     # --------------------------------------------------------------- #
 
-    def predict_objects(self, Q_fn: Callable[[int, Particle], np.ndarray]) -> None:
+    def predict_objects(self, Q_fn: Callable[[int, Particle], np.ndarray],
+                        P_max: Optional[np.ndarray] = None) -> None:
         """Apply per-particle EKF predict to every tracked object.
 
         Q_fn(oid, particle) → (6,6) process noise. This lets the caller pick
         Q based on manipulation phase, frames-since-obs, etc.
+
+        P_max is the optional covariance-saturation cap of ekf_se3.ekf_predict
+        (bernoulli_ekf.tex eq. eq:phi). Default None = no cap, matching
+        pre-Bernoulli behaviour.
 
         Note: constant-velocity mean (T unchanged); covariance inflates by Q.
         For manipulation-set members the caller should apply
@@ -226,7 +231,8 @@ class RBPFState:
         for p in self.particles:
             for oid, belief in p.objects.items():
                 Q = Q_fn(oid, p)
-                belief.mu, belief.cov = ekf_predict(belief.mu, belief.cov, Q)
+                belief.mu, belief.cov = ekf_predict(
+                    belief.mu, belief.cov, Q, P_max=P_max)
 
     def rigid_attachment_predict(self,
                                  oid: int,
@@ -274,13 +280,15 @@ class RBPFState:
                            oid: int,
                            T_co_meas: np.ndarray,
                            R_icp: np.ndarray,
-                           iekf_iters: int = 2) -> None:
+                           iekf_iters: int = 2,
+                           huber_w: float = 1.0,
+                           P_max: Optional[np.ndarray] = None) -> None:
         """Per-particle IEKF update + per-particle likelihood accumulation.
 
         For particle k:
             T_wo_meas^k = T_wb^k · T_co_meas
             δ^k         = log( μ^k · exp(-K δ) ... ) via IEKF relinearization
-            S^k         = Σ^k_o + R_icp
+            S^k         = Σ^k_o + R_icp / w
             log p(z|x^k, o^k) = -½ δ^kᵀ S^{-1} δ^k - ½ log det(2πS)
 
         The log-likelihood is added to particle.log_weight — that is how
@@ -289,8 +297,21 @@ class RBPFState:
 
         R_icp is treated as a world-frame 6×6 covariance; callers who have
         noise in camera frame should transform with Ad(T_wb · T_bc) upstream.
+
+        Args:
+            huber_w: Huber redescending M-estimator weight in [0, 1] from
+                ekf_se3.huber_weight(). Scales R by 1/w so the gain shrinks
+                with d^2. Default 1.0 = no Huber (pre-Bernoulli behaviour).
+                A caller passing w = 0 should NOT invoke this method (route
+                the detection to the missed branch instead); we treat it as
+                a clamp to a large reweight for numerical safety only.
+            P_max: optional (6, 6) covariance-saturation cap applied to the
+                posterior (bernoulli_ekf.tex eq. eq:phi). Default None =
+                no cap, matching pre-Bernoulli behaviour.
         """
         R_sym = 0.5 * (R_icp + R_icp.T)
+        if huber_w > 0.0 and huber_w < 1.0:
+            R_sym = R_sym / huber_w
         I6 = np.eye(6)
         two_pi_log = 6.0 * np.log(2.0 * np.pi)
 
@@ -326,11 +347,80 @@ class RBPFState:
                 except np.linalg.LinAlgError:
                     log_lik = self._LOG_EPS
 
+            cov_post = (I6 - K) @ belief.cov
+            cov_post = 0.5 * (cov_post + cov_post.T)
+            if P_max is not None:
+                cov_post = saturate_covariance(cov_post, P_max)
             belief.mu = mu_lin
-            belief.cov = (I6 - K) @ belief.cov
-            belief.cov = 0.5 * (belief.cov + belief.cov.T)
+            belief.cov = cov_post
 
             p.log_weight += log_lik
+
+    # --------------------------------------------------------------- #
+    #  Innovation statistics for data association
+    # --------------------------------------------------------------- #
+
+    def innovation_stats(self,
+                         oid: int,
+                         T_co_meas: np.ndarray,
+                         R_icp: np.ndarray) -> Optional[tuple]:
+        """Weighted-particle-averaged innovation quantities for a
+        (track, measurement) pair; used to build the Hungarian cost matrix.
+
+        Returns (nu, S, d2, log_lik) where:
+            nu    = innovation in se(3) tangent at the collapsed prior mean
+            S     = residual covariance (Sigma_obj + R_icp), collapsed
+            d2    = nu^T S^{-1} nu
+            log_lik = Gaussian log-likelihood of the innovation (cf.
+                      bernoulli_ekf.tex eq. eq:ekf_lik)
+
+        None is returned if `oid` does not exist in any particle.
+        """
+        collapsed = self.collapsed_object(oid)
+        if collapsed is None:
+            return None
+        T_prior = collapsed.T
+        cov_prior = collapsed.cov
+
+        # The measurement T_co is camera-frame; we project it to world frame
+        # using the collapsed base pose (mean of the particle cloud). This
+        # is the per-formulation single-Gaussian approximation used in data
+        # association; per-particle updates remain mixture-exact.
+        base_pe = self.collapsed_base()
+        T_wo_meas = base_pe.T @ T_co_meas
+
+        nu = se3_log(np.linalg.inv(T_prior) @ T_wo_meas)
+        R_sym = 0.5 * (R_icp + R_icp.T)
+        S = cov_prior + R_sym
+        S = 0.5 * (S + S.T)
+
+        sign, logdet = np.linalg.slogdet(S)
+        try:
+            Sinv_nu = np.linalg.solve(S, nu)
+            d2 = float(nu @ Sinv_nu)
+        except np.linalg.LinAlgError:
+            d2 = float("inf")
+            Sinv_nu = None
+        if sign <= 0 or not np.isfinite(logdet) or not np.isfinite(d2):
+            log_lik = self._LOG_EPS
+        else:
+            two_pi_log = 6.0 * np.log(2.0 * np.pi)
+            log_lik = -0.5 * d2 - 0.5 * (float(logdet) + two_pi_log)
+        return nu, S, d2, log_lik
+
+    # --------------------------------------------------------------- #
+    #  Object deletion
+    # --------------------------------------------------------------- #
+
+    def delete_object(self, oid: int) -> bool:
+        """Remove `oid` from every particle. Returns True if any particle
+        held this object, else False."""
+        removed = False
+        for p in self.particles:
+            if oid in p.objects:
+                del p.objects[oid]
+                removed = True
+        return removed
 
     # --------------------------------------------------------------- #
     #  Resampling
