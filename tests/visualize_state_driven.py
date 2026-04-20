@@ -110,9 +110,18 @@ def _draw_state_driven_panel(ax,
     ax.imshow(rgb)
     H, W = rgb.shape[:2]
 
-    # Only tracks that existed at or before this frame are "alive" here.
+    # A track is "alive" at every frame from its birth forward -- tracks
+    # are never deleted, per the state-driven design (they persist even
+    # when out of FOV). Birth is the earliest observation; we fall back
+    # to first_frame if scores_by_frame is empty (shouldn't happen in
+    # practice but keeps the gate robust).
+    def _birth_frame(tr) -> int:
+        if tr.scores_by_frame:
+            return min(tr.scores_by_frame.keys())
+        return tr.first_frame
+
     alive = {oid: tr for oid, tr in state.items()
-             if tr.first_frame <= frame_idx_video}
+             if _birth_frame(tr) <= frame_idx_video}
 
     # Project each alive track; record FOV status.
     projections: Dict[int, Optional[Tuple[float, float, float]]] = {}

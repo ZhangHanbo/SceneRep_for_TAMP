@@ -81,7 +81,6 @@ if _REPO_ROOT not in sys.path:
 from rosbag2dataset.sam2.sam2_client import (
     OwlDet, SAM2Client, PropagatedFrame,
     _load_owl_detections, _load_frames,
-    _cluster_new_prompts,
 )
 from rosbag2dataset.server_configs import SAM2_SERVER_URL
 
@@ -98,16 +97,72 @@ _INIT_COV_W: np.ndarray = np.diag([_INIT_SIGMA_M ** 2] * 3)
 _Q_STATIC: np.ndarray = np.diag([1e-4] * 3)
 
 # Back-projection noise floor (m^2 per axis) for the measurement cov.
-# 5 cm 1-sigma. A mask centroid is only as accurate as the visible
-# portion of the object from the current viewpoint, so we have to
-# admit several cm of systematic jitter when the camera orbits. Smaller
-# values (< 1 cm) cause Hungarian to reject every post-birth candidate
-# and spawn duplicate tracks per-frame.
-_R_OBS: np.ndarray = np.diag([2.5e-3] * 3)   # 5 cm 1-sigma
+# 10 cm 1-sigma. A mask centroid shifts across camera viewpoints by
+# 5-20 cm (different visible portion of the object), and for a moving
+# object (held bowl during manipulation) the apparent drift per frame
+# can be several cm. This is a conservative floor that keeps Hungarian
+# matching forgiving without overriding genuine separation between
+# distinct objects. Smaller values (< 1 cm) cause every post-birth
+# candidate to be rejected and spawn duplicate tracks per frame.
+_R_OBS: np.ndarray = np.diag([1e-2] * 3)   # 10 cm 1-sigma
 
 # Chi^2_3(0.9997) outer gate for 3-D Mahalanobis (matches the paper's
 # choice for the 6-D case scaled down by DoF).
 _G_OUT_3D: float = 18.47
+
+# Cluster-merge radius for unmatched OWL candidates (world frame). Two
+# candidates with the same label within this distance go in the same
+# cluster. Also used as the world-space merge threshold before spawning
+# a new track -- if any same-label state track is within this distance
+# of the candidate, merge into it rather than creating a duplicate.
+# Wide enough to cover the reach of a hand-held object through a
+# manipulation trajectory (typical ~0.5 m table-top motion) without
+# collapsing spatially-distinct same-class objects.
+_CLUSTER_MERGE_M: float = 0.50
+
+
+def _cluster_prompts_3d(
+    prompts: List[Tuple[int, Dict[str, Any]]],
+    dist_thresh_m: float = _CLUSTER_MERGE_M,
+) -> List[Tuple[int, Dict[str, Any]]]:
+    """Cluster unmatched (video_idx, candidate) pairs by world-frame
+    proximity inside the same class label.
+
+    Two candidates merge when their running-average world centroid is
+    within ``dist_thresh_m``. This replaces the legacy 2-D bbox-IoU
+    clustering, which collapses under camera motion (same physical
+    object projects to different image regions frame-to-frame).
+
+    Representative per cluster = **earliest video_idx** so the track's
+    ``first_frame`` reflects the true birth frame.
+    """
+    from collections import defaultdict
+    if not prompts:
+        return []
+    by_label: Dict[str, List[Tuple[int, Dict[str, Any]]]] = defaultdict(list)
+    for video_idx, cand in prompts:
+        by_label[cand["label"]].append((video_idx, cand))
+
+    out: List[Tuple[int, Dict[str, Any]]] = []
+    for label, items in by_label.items():
+        items.sort(key=lambda p: p[0])
+        clusters: List[List[Tuple[int, Dict[str, Any]]]] = []
+        for video_idx, cand in items:
+            cw = cand["cw"]
+            placed = False
+            for cl in clusters:
+                avg = np.mean(np.stack([c["cw"] for _, c in cl], axis=0),
+                              axis=0)
+                if np.linalg.norm(avg - cw) < dist_thresh_m:
+                    cl.append((video_idx, cand))
+                    placed = True
+                    break
+            if not placed:
+                clusters.append([(video_idx, cand)])
+        for cl in clusters:
+            rep_idx, rep_cand = min(cl, key=lambda p: p[0])
+            out.append((rep_idx, rep_cand))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -422,29 +477,44 @@ def state_driven_reconcile(inputs: ReconcileInputs,
                 print(f"[state-reconcile] converged after {it+1} iter(s)")
             break
 
-        # Cluster unmatched across frames, pick highest-score rep per cluster.
-        owl_dets_for_cluster = [
-            (vi, OwlDet(frame_idx=vi, label=c["label"],
-                         score=c["score"], box=c["box"]))
-            for vi, c in new_prompts
-        ]
-        clustered = _cluster_new_prompts(owl_dets_for_cluster,
-                                          iou_thresh=0.3)
-        # Map back to the candidate dicts (need the world centroid).
-        rep_set = {(vi, ow.label, tuple(ow.box)) for vi, ow in clustered}
-        kept: List[Tuple[int, Dict[str, Any]]] = []
-        for vi, cand in new_prompts:
-            if (vi, cand["label"], tuple(cand["box"])) in rep_set:
-                kept.append((vi, cand))
-        kept.sort(key=lambda p: -p[1]["score"])
+        # Cluster unmatched by world-frame centroid proximity within
+        # label; representative = earliest frame so first_frame reflects
+        # the true birth frame.
+        kept = _cluster_prompts_3d(new_prompts,
+                                    dist_thresh_m=_CLUSTER_MERGE_M)
+        kept.sort(key=lambda p: (p[0], -p[1]["score"]))
         kept = kept[:max_new_per_iter]
 
+        # World-space merge check: even if a candidate failed the per-frame
+        # Hungarian (because the matching track was out of FOV that frame),
+        # absorb it into the nearest same-label state track when the 3-D
+        # distance is within the cluster merge radius. This is what
+        # prevents duplicate tracks when an object leaves the FOV and
+        # comes back, without relying on SAM2 backward propagation.
         added = 0
+        merged = 0
         for video_idx, cand in kept:
-            _add_new_track(video_idx, cand)
-            added += 1
+            best_d = float("inf")
+            best_oid: Optional[int] = None
+            for oid, tr in state.items():
+                if enforce_label and tr.label != cand["label"]:
+                    continue
+                d = float(np.linalg.norm(tr.mu_w - cand["cw"]))
+                if d < best_d:
+                    best_d = d
+                    best_oid = oid
+            if best_oid is not None and best_d < _CLUSTER_MERGE_M:
+                # Absorb into the existing track rather than spawning.
+                _update_track_state(state[best_oid], cand["cw"])
+                state[best_oid].scores_by_frame[video_idx] = \
+                    float(cand["score"])
+                merged += 1
+            else:
+                _add_new_track(video_idx, cand)
+                added += 1
         if verbose:
-            print(f"[state-reconcile] iter={it} added {added} new tracks  "
+            print(f"[state-reconcile] iter={it} added {added} new tracks, "
+                  f"merged {merged} into existing "
                   f"(candidates {len(new_prompts)} -> clustered "
                   f"{len(kept)} kept)")
 
