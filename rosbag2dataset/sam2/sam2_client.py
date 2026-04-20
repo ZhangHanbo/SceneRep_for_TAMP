@@ -566,16 +566,22 @@ def _track_dataset_state_driven(dataset_root: str,
                                  min_score: float,
                                  pose_txt: Optional[str],
                                  K: np.ndarray) -> None:
-    """Run the state-driven reconciler end-to-end, writing detection_h/
+    """Run the coupled online pipeline end-to-end, writing detection_h/
     from the final SAM2 propagation.
+
+    Under --state-driven the orchestrator is the single state store:
+    each frame drives orch.step (predict + Hungarian in SE(3) + EKF
+    update + birth) and seeds SAM2 for newly-birthed tracks. After all
+    frames, sam2.propagate() retrieves per-frame masks and we write
+    detection_h in the legacy schema.
 
     Requires camera intrinsics (K) and per-frame camera poses (from
     pose_txt). For the Fetch-style `Mobile_Manipulation_on_Fetch` layout
-    the poses live under `<dataset>/pose_txt/camera_pose.txt` and can be
-    omitted from the CLI (auto-located).
+    the poses live under `<dataset>/pose_txt/camera_pose.txt` and are
+    auto-located.
     """
-    from rosbag2dataset.sam2.state_driven_reconcile import (
-        state_driven_reconcile, ReconcileInputs,
+    from rosbag2dataset.sam2.coupled_reconcile import (
+        coupled_reconcile, CoupledInputs, make_coupled_orchestrator,
     )
 
     rgb_dir = os.path.join(dataset_root, "rgb")
@@ -620,43 +626,51 @@ def _track_dataset_state_driven(dataset_root: str,
     owl_by_fid = _load_owl_detections(det_dir, min_score=min_score)
     H, W = rgb_frames[0].shape[:2]
 
-    inputs = ReconcileInputs(
+    inputs = CoupledInputs(
         frame_ids=frame_ids, rgb=rgb_frames, depth=depth_frames,
         cam_poses=cam_poses, K=K, image_shape=(H, W),
         owl_by_fid=owl_by_fid,
     )
 
+    orch = make_coupled_orchestrator(cam_poses)
     with SAM2Client(server_url=server_url) as sam2:
-        state, prop_by_idx = state_driven_reconcile(
-            inputs, sam2, max_iters=max_iters)
+        prop_by_idx = coupled_reconcile(orch, inputs, sam2)
 
-    # Write detection_h/*_final.json (same schema the legacy path uses).
-    _write_detection_h(dataset_root, out_dir_name, frame_ids,
-                        prop_by_idx, state)
+    _write_detection_h_from_orch(
+        dataset_root, out_dir_name, frame_ids, prop_by_idx, orch)
 
 
-def _write_detection_h(dataset_root: str, out_dir_name: str,
-                        frame_ids: List[int],
-                        prop_by_idx: List["PropagatedFrame"],
-                        state: Dict[int, "TrackState3D"]) -> None:
+def _write_detection_h_from_orch(
+    dataset_root: str, out_dir_name: str,
+    frame_ids: List[int],
+    prop_by_idx: List["PropagatedFrame"],
+    orch: "TwoTierOrchestrator",
+) -> None:
     """Serialise per-frame {object_id, label, box, mask, score} to
-    detection_h/*_final.json, matching the legacy output schema."""
+    detection_h/*_final.json, matching the legacy output schema.
+
+    Pulls labels from orch.object_labels (the orchestrator is the
+    state store) and scores from the per-track r value.
+    """
     out_dir = os.path.join(dataset_root, out_dir_name)
     for i, fid in enumerate(frame_ids):
         prop = (prop_by_idx[i] if i < len(prop_by_idx)
                 else PropagatedFrame(object_masks={}, object_bboxes={}))
         entries = []
         for oid, mask in prop.object_masks.items():
-            tr = state.get(oid)
-            if tr is None:
+            if oid not in orch.object_labels:
                 continue
             box = prop.object_bboxes.get(oid)
             if box is None:
                 box = _bbox_from_mask(mask)
+            label = orch.object_labels.get(oid, "unknown")
+            r = float(orch.existence.get(oid, 1.0))
             entries.append({
                 "object_id": int(oid),
-                "label": tr.label,
-                "score": float(tr.scores_by_frame.get(i, 0.0)),
+                "label": label,
+                "score": r,        # existence probability in place of
+                                   # per-frame OWL score: it's the
+                                   # orchestrator's confidence summary
                 "box": [int(v) for v in box],
                 "mask": _mask_to_png_b64(mask),
             })
