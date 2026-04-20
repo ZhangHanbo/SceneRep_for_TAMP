@@ -49,14 +49,8 @@ DEFAULT_OBJECTS = [
     "apple", "cup", "bottle", "cola", "bowl", "tray", "cabinet",
 ]
 
-# OWL bbox-confidence threshold. A single value applied uniformly:
-# every frame, every class. The dict shape is preserved so existing
-# callers (owl_client._per_class_threshold) keep working without
-# modification, but every entry is the same constant.
-_BBOX_CONF: float = 0.15
-
-OWL_SCORE_THRESHOLDS = {
-    "first_default": _BBOX_CONF,
-    "subsequent":    _BBOX_CONF,
-    "per_class_first_frame": {},   # no per-class overrides
-}
+# OWL request parameters. Applied uniformly: every frame, every class,
+# no client-side post-processing. The server's own NMS at this IoU is
+# the only filter that runs.
+OWL_BBOX_CONF: float = 0.2
+OWL_NMS_IOU:   float = 0.5
