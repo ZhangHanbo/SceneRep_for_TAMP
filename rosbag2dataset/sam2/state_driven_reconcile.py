@@ -87,16 +87,23 @@ from rosbag2dataset.server_configs import SAM2_SERVER_URL
 
 
 # Initial translation covariance for a freshly-born track (m^2 per axis).
-_INIT_SIGMA_M: float = 0.15            # 15 cm 1-sigma
+# 25 cm 1-sigma: loose enough that the first subsequent match pulls the
+# track mean toward the observation, even if the centroid jitters with
+# camera viewpoint.
+_INIT_SIGMA_M: float = 0.25
 _INIT_COV_W: np.ndarray = np.diag([_INIT_SIGMA_M ** 2] * 3)
 
-# Per-frame static-object process noise (m^2 per axis).
-_Q_STATIC: np.ndarray = np.diag([1e-5] * 3)
+# Per-frame static-object process noise (m^2 per axis). Loose enough to
+# admit slow drift of the back-projected centroid as camera moves.
+_Q_STATIC: np.ndarray = np.diag([1e-4] * 3)
 
 # Back-projection noise floor (m^2 per axis) for the measurement cov.
-# Conservative: centroid estimates jitter at sub-centimeter even on
-# clean depth.
-_R_OBS: np.ndarray = np.diag([2e-4] * 3)   # 1.4 cm 1-sigma
+# 5 cm 1-sigma. A mask centroid is only as accurate as the visible
+# portion of the object from the current viewpoint, so we have to
+# admit several cm of systematic jitter when the camera orbits. Smaller
+# values (< 1 cm) cause Hungarian to reject every post-birth candidate
+# and spawn duplicate tracks per-frame.
+_R_OBS: np.ndarray = np.diag([2.5e-3] * 3)   # 5 cm 1-sigma
 
 # Chi^2_3(0.9997) outer gate for 3-D Mahalanobis (matches the paper's
 # choice for the 6-D case scaled down by DoF).
