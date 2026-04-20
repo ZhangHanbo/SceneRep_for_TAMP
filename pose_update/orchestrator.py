@@ -693,7 +693,10 @@ class TwoTierOrchestrator:
             self.existence[oid] = r_new
 
             # SAM2-ID bookkeeping: update only on a successful match.
-            d_tau = det.get("sam2_id")
+            # Fall back to `id` if the detector client hasn't populated
+            # `sam2_id` explicitly (paper §6.1: the upstream tracklet
+            # identifier is the same quantity either way).
+            d_tau = det.get("sam2_id", det.get("id"))
             if d_tau is not None:
                 try:
                     self.sam2_tau[oid] = int(d_tau)
@@ -845,7 +848,7 @@ class TwoTierOrchestrator:
         self.existence[d_id] = r_birth(
             score, lambda_b=cfg.lambda_b, lambda_c=cfg.lambda_c)
 
-        d_tau = det.get("sam2_id")
+        d_tau = det.get("sam2_id", det.get("id"))
         if d_tau is not None:
             try:
                 self.sam2_tau[d_id] = int(d_tau)

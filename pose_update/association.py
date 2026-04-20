@@ -144,10 +144,14 @@ def hungarian_associate(
             _nu, _S, d2, log_lik = stats
             if not math.isfinite(d2) or d2 > G_out:
                 continue
-            # SAM2 continuity bonus.
+            # SAM2 continuity bonus. `sam2_id` is preferred; fall back to
+            # `id` (the upstream tracklet id under the test harness convention)
+            # so that stable SAM2 identity still fires the alpha bonus even
+            # when only the legacy `id` key is populated by the detector
+            # client.
             bonus = 0.0
             if alpha > 0.0 and t_tau is not None:
-                d_tau_raw = det.get("sam2_id")
+                d_tau_raw = det.get("sam2_id", det.get("id"))
                 if d_tau_raw is not None:
                     d_tau = int(d_tau_raw)
                     if d_tau >= 0 and d_tau == t_tau:

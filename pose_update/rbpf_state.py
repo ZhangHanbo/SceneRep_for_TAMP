@@ -347,7 +347,13 @@ class RBPFState:
                 except np.linalg.LinAlgError:
                     log_lik = self._LOG_EPS
 
-            cov_post = (I6 - K) @ belief.cov
+            # Joseph-form covariance update (bernoulli_ekf.tex eq. eq:ekf_P_upd):
+            #     P_{k|k} = (I - K) P_{k|k-1} (I - K)^T + K R K^T
+            # Equivalent to (I-K)P under exact arithmetic, but PSD-preserving
+            # under rounding error when K drifts from optimal (e.g., with
+            # Huber re-weighting R <- R/w). We then optionally apply Phi.
+            I_K = I6 - K
+            cov_post = I_K @ belief.cov @ I_K.T + K @ R_sym @ K.T
             cov_post = 0.5 * (cov_post + cov_post.T)
             if P_max is not None:
                 cov_post = saturate_covariance(cov_post, P_max)
