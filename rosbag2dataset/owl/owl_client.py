@@ -114,7 +114,39 @@ def call_owl(rgb: np.ndarray,
 
 
 # ---------------------------------------------------------------------------
-# Per-frame processing -- direct server call, no client-side post-processing
+# Client-side size filter (single remaining post-processing step)
+# ---------------------------------------------------------------------------
+
+def _filter_by_size(bboxes_norm: np.ndarray,
+                    img_w: int, img_h: int,
+                    max_area_frac: float = 0.75,
+                    min_side_px: int = 5,
+                    min_area_px: int = 100) -> np.ndarray:
+    """Return a boolean mask of bboxes that survive size filtering.
+
+    Drops three kinds of degenerate boxes:
+      * covering more than ``max_area_frac`` of the image -- almost
+        always OWL hallucinations covering the whole scene,
+      * with any side shorter than ``min_side_px`` pixels -- slivers,
+      * with total area below ``min_area_px`` pixels -- sub-threshold
+        edge artifacts.
+    """
+    if bboxes_norm.size == 0:
+        return np.ones(0, dtype=bool)
+    box_w_norm = bboxes_norm[:, 2] - bboxes_norm[:, 0]
+    box_h_norm = bboxes_norm[:, 3] - bboxes_norm[:, 1]
+    areas_norm = box_w_norm * box_h_norm
+    pix_w = img_w * box_w_norm
+    pix_h = img_h * box_h_norm
+    pix_area = pix_w * pix_h
+    keep = (areas_norm < max_area_frac) \
+         & (pix_w >= min_side_px) & (pix_h >= min_side_px) \
+         & (pix_area >= min_area_px)
+    return keep
+
+
+# ---------------------------------------------------------------------------
+# Per-frame processing -- server call + size filter, nothing else
 # ---------------------------------------------------------------------------
 
 def process_frame(rgb_path: str,
@@ -140,6 +172,17 @@ def process_frame(rgb_path: str,
         nms_cat_threshold=nms_cat,
         server_url=server_url, with_nms=with_nms,
     )
+
+    # Size filter: drop > 75 % of image, slivers under 5 px, areas below
+    # 100 px^2. Kept because OWL sometimes produces full-frame boxes and
+    # 1-3 pixel edge artifacts that would otherwise seed SAM2.
+    if len(box_names) > 0:
+        keep = _filter_by_size(bboxes_norm, w, h)
+        if not keep.all():
+            idx = np.where(keep)[0]
+            bboxes_norm = bboxes_norm[keep]
+            scores = scores[keep]
+            box_names = [box_names[int(i)] for i in idx]
 
     # Pixel-space boxes, in the same [x1, y1, x2, y2] format the old script used.
     pix_boxes: List[List[int]] = []
