@@ -350,8 +350,12 @@ def track_dataset(dataset_root: str,
                   min_score: float = 0.0) -> None:
 
     rgb_dir = os.path.join(dataset_root, "rgb")
-    det_dir = os.path.join(dataset_root, det_dir_name)
-    out_dir = os.path.join(dataset_root, out_dir_name)
+    # Absolute det_dir_name / out_dir_name go there directly; relative
+    # paths are joined with dataset_root (backwards-compatible).
+    det_dir = (det_dir_name if os.path.isabs(det_dir_name)
+               else os.path.join(dataset_root, det_dir_name))
+    out_dir = (out_dir_name if os.path.isabs(out_dir_name)
+               else os.path.join(dataset_root, out_dir_name))
     os.makedirs(out_dir, exist_ok=True)
 
     print(f"[sam2-client] dataset={dataset_root}  server={server_url}")
@@ -461,7 +465,22 @@ def track_dataset(dataset_root: str,
 
     # -----------------------------------------------------------------
     #  Write detection_h/*_final.json
+    #
+    #  Per-track `mean_score` is the average OWL confidence across every
+    #  frame this track was re-detected on. Tracks that got seeded once
+    #  and never re-observed keep their seed score; tracks that were
+    #  frequently re-detected on high-confidence OWL boxes converge to a
+    #  high mean. Downstream consumers can filter on this belief to drop
+    #  hallucinations (e.g. viz panels keep mean_score > 0.1).
     # -----------------------------------------------------------------
+    track_mean_score: Dict[int, float] = {}
+    for oid, tr in tracks.items():
+        if tr.scores_by_frame:
+            track_mean_score[oid] = float(
+                np.mean(list(tr.scores_by_frame.values())))
+        else:
+            track_mean_score[oid] = float(tr.score)
+
     print(f"[sam2-client] writing {len(frame_ids)} JSONs → {out_dir}")
     for i, prop in enumerate(prop_by_idx):
         fid = idx_to_fid.get(i, i)
@@ -472,11 +491,13 @@ def track_dataset(dataset_root: str,
             # fall back to the seeding score.
             sc = tracks[oid].scores_by_frame.get(i, tracks[oid].score)
             dets_out.append({
-                "object_id": int(oid),
-                "label":     tracks[oid].label,
-                "score":     float(sc),
-                "box":       list(map(int, bbox)),
-                "mask":      _mask_to_png_b64(mask),
+                "object_id":  int(oid),
+                "label":      tracks[oid].label,
+                "score":      float(sc),
+                "mean_score": float(track_mean_score[oid]),
+                "n_obs":      int(len(tracks[oid].scores_by_frame)),
+                "box":        list(map(int, bbox)),
+                "mask":       _mask_to_png_b64(mask),
             })
         out_path = os.path.join(out_dir, f"detection_{fid:06d}_final.json")
         with open(out_path, "w") as f:
@@ -512,171 +533,24 @@ def main() -> int:
                     help="output subdir (default: detection_h)")
     ap.add_argument("--new-obj-iou", type=float, default=0.3,
                     help="IoU (bbox vs propagated mask) below which an OWL "
-                         "detection spawns a NEW track (default: 0.3, "
-                         "legacy 2-D reconciliation path only)")
+                         "detection spawns a NEW track (default: 0.3)")
     ap.add_argument("--max-iters", type=int, default=4,
                     help="max propagate+add-prompt cycles (default: 4)")
     ap.add_argument("--min-score", type=float, default=0.0,
                     help="drop OWL dets below this score "
                          "before seeding (default: 0)")
-    ap.add_argument("--state-driven", action="store_true",
-                    help="use the state-driven reconciliation "
-                         "(3-D Hungarian + FOV gate from bernoulli_ekf.tex). "
-                         "Requires --pose-txt and --K-fx/--K-cx/etc. for "
-                         "back-projection; defaults match the Fetch dataset")
-    ap.add_argument("--pose-txt", default=None,
-                    help="path to camera_pose.txt (state-driven only)")
-    ap.add_argument("--K-fx", type=float, default=554.3827)
-    ap.add_argument("--K-fy", type=float, default=554.3827)
-    ap.add_argument("--K-cx", type=float, default=320.5)
-    ap.add_argument("--K-cy", type=float, default=240.5)
     args = ap.parse_args()
 
-    if args.state_driven:
-        _track_dataset_state_driven(
-            dataset_root=args.dataset,
-            server_url=args.server,
-            det_dir_name=args.det_dir,
-            out_dir_name=args.out_dir,
-            max_iters=args.max_iters,
-            min_score=args.min_score,
-            pose_txt=args.pose_txt,
-            K=np.array([[args.K_fx, 0.0, args.K_cx],
-                        [0.0, args.K_fy, args.K_cy],
-                        [0.0, 0.0, 1.0]], dtype=np.float64),
-        )
-    else:
-        track_dataset(
-            dataset_root=args.dataset,
-            server_url=args.server,
-            det_dir_name=args.det_dir,
-            out_dir_name=args.out_dir,
-            new_obj_iou=args.new_obj_iou,
-            max_iters=args.max_iters,
-            min_score=args.min_score,
-        )
+    track_dataset(
+        dataset_root=args.dataset,
+        server_url=args.server,
+        det_dir_name=args.det_dir,
+        out_dir_name=args.out_dir,
+        new_obj_iou=args.new_obj_iou,
+        max_iters=args.max_iters,
+        min_score=args.min_score,
+    )
     return 0
-
-
-def _track_dataset_state_driven(dataset_root: str,
-                                 server_url: str,
-                                 det_dir_name: str,
-                                 out_dir_name: str,
-                                 max_iters: int,
-                                 min_score: float,
-                                 pose_txt: Optional[str],
-                                 K: np.ndarray) -> None:
-    """Run the coupled online pipeline end-to-end, writing detection_h/
-    from the final SAM2 propagation.
-
-    Under --state-driven the orchestrator is the single state store:
-    each frame drives orch.step (predict + Hungarian in SE(3) + EKF
-    update + birth) and seeds SAM2 for newly-birthed tracks. After all
-    frames, sam2.propagate() retrieves per-frame masks and we write
-    detection_h in the legacy schema.
-
-    Requires camera intrinsics (K) and per-frame camera poses (from
-    pose_txt). For the Fetch-style `Mobile_Manipulation_on_Fetch` layout
-    the poses live under `<dataset>/pose_txt/camera_pose.txt` and are
-    auto-located.
-    """
-    from rosbag2dataset.sam2.coupled_reconcile import (
-        coupled_reconcile, CoupledInputs, make_coupled_orchestrator,
-    )
-
-    rgb_dir = os.path.join(dataset_root, "rgb")
-    det_dir = os.path.join(dataset_root, det_dir_name)
-    depth_dir = os.path.join(dataset_root, "depth")
-    out_dir = os.path.join(dataset_root, out_dir_name)
-    os.makedirs(out_dir, exist_ok=True)
-
-    pose_path = pose_txt or os.path.join(
-        dataset_root, "pose_txt", "camera_pose.txt")
-    if not os.path.exists(pose_path):
-        raise FileNotFoundError(f"state-driven needs pose file: {pose_path}")
-
-    print(f"[state-driven] dataset={dataset_root}  server={server_url}")
-    frame_ids, rgb_frames = _load_frames(rgb_dir)
-    if not rgb_frames:
-        raise FileNotFoundError(f"no RGB in {rgb_dir}")
-    depth_frames: List[np.ndarray] = []
-    for fid in frame_ids:
-        depth_path = os.path.join(depth_dir, f"depth_{fid:06d}.npy")
-        depth_frames.append(np.load(depth_path).astype(np.float32)
-                             if os.path.exists(depth_path)
-                             else np.zeros(rgb_frames[0].shape[:2],
-                                           dtype=np.float32))
-
-    # Camera poses (T_cw, 4x4 per frame) -- one line per frame:
-    # frame_id tx ty tz qx qy qz qw.
-    from scipy.spatial.transform import Rotation
-    pose_per_fid: Dict[int, np.ndarray] = {}
-    with open(pose_path, "r") as f:
-        for line in f:
-            arr = line.strip().split()
-            if len(arr) != 8:
-                continue
-            fid_i, tx, ty, tz, qx, qy, qz, qw = [float(x) for x in arr]
-            T = np.eye(4, dtype=np.float64)
-            T[:3, :3] = Rotation.from_quat([qx, qy, qz, qw]).as_matrix()
-            T[:3, 3] = [tx, ty, tz]
-            pose_per_fid[int(fid_i)] = T
-    cam_poses = [pose_per_fid.get(fid, np.eye(4)) for fid in frame_ids]
-
-    owl_by_fid = _load_owl_detections(det_dir, min_score=min_score)
-    H, W = rgb_frames[0].shape[:2]
-
-    inputs = CoupledInputs(
-        frame_ids=frame_ids, rgb=rgb_frames, depth=depth_frames,
-        cam_poses=cam_poses, K=K, image_shape=(H, W),
-        owl_by_fid=owl_by_fid,
-    )
-
-    orch = make_coupled_orchestrator(cam_poses)
-    with SAM2Client(server_url=server_url) as sam2:
-        prop_by_idx = coupled_reconcile(orch, inputs, sam2)
-
-    _write_detection_h_from_orch(
-        dataset_root, out_dir_name, frame_ids, prop_by_idx, orch)
-
-
-def _write_detection_h_from_orch(
-    dataset_root: str, out_dir_name: str,
-    frame_ids: List[int],
-    prop_by_idx: List["PropagatedFrame"],
-    orch: "TwoTierOrchestrator",
-) -> None:
-    """Serialise per-frame {object_id, label, box, mask, score} to
-    detection_h/*_final.json, matching the legacy output schema.
-
-    Pulls labels from orch.object_labels (the orchestrator is the
-    state store) and scores from the per-track r value.
-    """
-    out_dir = os.path.join(dataset_root, out_dir_name)
-    for i, fid in enumerate(frame_ids):
-        prop = (prop_by_idx[i] if i < len(prop_by_idx)
-                else PropagatedFrame(object_masks={}, object_bboxes={}))
-        entries = []
-        for oid, mask in prop.object_masks.items():
-            if oid not in orch.object_labels:
-                continue
-            box = prop.object_bboxes.get(oid)
-            if box is None:
-                box = _bbox_from_mask(mask)
-            label = orch.object_labels.get(oid, "unknown")
-            r = float(orch.existence.get(oid, 1.0))
-            entries.append({
-                "object_id": int(oid),
-                "label": label,
-                "score": r,        # existence probability in place of
-                                   # per-frame OWL score: it's the
-                                   # orchestrator's confidence summary
-                "box": [int(v) for v in box],
-                "mask": _mask_to_png_b64(mask),
-            })
-        out_path = os.path.join(out_dir, f"detection_{fid:06d}_final.json")
-        with open(out_path, "w") as f:
-            json.dump({"detections": entries}, f, indent=2)
 
 
 if __name__ == "__main__":

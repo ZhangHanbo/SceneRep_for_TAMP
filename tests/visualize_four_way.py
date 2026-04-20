@@ -227,8 +227,15 @@ def run(trajectory: str = "apple_bowl_2",
         make_video: bool = True) -> None:
     data_root = os.path.join(DATA_BASE, trajectory)
     rgb_dir = os.path.join(data_root, "rgb")
-    cached_dir = os.path.join(data_root, "detection_h")
-    runtime_dir = os.path.join(data_root, "detection_boxes")
+    perception_root = os.path.join(
+        SCENEREP_ROOT, "tests", "visualization_pipeline", trajectory,
+        "perception")
+    pp_cached = os.path.join(perception_root, "detection_h")
+    pp_runtime = os.path.join(perception_root, "detection_boxes")
+    cached_dir = pp_cached if os.path.isdir(pp_cached) \
+        else os.path.join(data_root, "detection_h")
+    runtime_dir = pp_runtime if os.path.isdir(pp_runtime) \
+        else os.path.join(data_root, "detection_boxes")
     if not (os.path.isdir(rgb_dir) and os.path.isdir(cached_dir)):
         print(f"[viz] missing rgb/ or detection_h/ in {data_root}",
               file=sys.stderr)

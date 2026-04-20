@@ -281,7 +281,11 @@ def main() -> int:
             obj_source = "default (no det_config.json)"
 
     rgb_dir = os.path.join(dataset_dir, "rgb")
-    out_dir = os.path.join(dataset_dir, args.out_dir)
+    # Absolute --out-dir goes there directly; relative is joined with
+    # dataset_dir (backwards-compatible with the old behaviour of writing
+    # a subfolder inside the dataset).
+    out_dir = (args.out_dir if os.path.isabs(args.out_dir)
+               else os.path.join(dataset_dir, args.out_dir))
     os.makedirs(out_dir, exist_ok=True)
 
     files = sorted(f for f in os.listdir(rgb_dir)

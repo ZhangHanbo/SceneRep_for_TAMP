@@ -70,12 +70,17 @@ def _palette_color(oid: int) -> Tuple[int, int, int]:
     return _PALETTE_RGB[int(oid) % len(_PALETTE_RGB)]
 
 
-def _load_detections(json_path: str) -> List[Dict[str, Any]]:
+def _load_detections(json_path: str,
+                      min_mean_score: float = 0.0) -> List[Dict[str, Any]]:
     """Load one frame's detections; decode mask PNGs from base64.
 
     Returns a list of dicts with keys:
-        object_id, label, score, box (xyxy), mask (H, W uint8).
-    Detections without a mask / box are skipped.
+        object_id, label, score, mean_score, n_obs, box (xyxy), mask (H, W uint8).
+    Detections without a mask / box are skipped. If
+    ``min_mean_score > 0``, tracks whose ``mean_score`` (the average OWL
+    confidence across all frames the track was re-detected on, written
+    by sam2_client) is below the threshold are filtered out here -- so
+    the visualisation shows only persistent high-confidence tracks.
     """
     if not os.path.exists(json_path):
         return []
@@ -84,6 +89,9 @@ def _load_detections(json_path: str) -> List[Dict[str, Any]]:
 
     out: List[Dict[str, Any]] = []
     for det in data.get("detections", []):
+        mean_sc = float(det.get("mean_score", det.get("score", 0.0)))
+        if mean_sc < min_mean_score:
+            continue
         mask_b64 = det.get("mask", "")
         if not mask_b64:
             continue
@@ -95,10 +103,12 @@ def _load_detections(json_path: str) -> List[Dict[str, Any]]:
             continue
         out.append({
             "object_id": det.get("object_id"),
-            "label": det.get("label", "?"),
-            "score": float(det.get("score", 0.0)),
-            "box": det.get("box"),
-            "mask": mask,
+            "label":      det.get("label", "?"),
+            "score":      float(det.get("score", 0.0)),
+            "mean_score": mean_sc,
+            "n_obs":      int(det.get("n_obs", 0)),
+            "box":        det.get("box"),
+            "mask":       mask,
         })
     return out
 
@@ -249,10 +259,18 @@ def _pngs_to_mp4(png_dir: str, mp4_path: str, fps: int = 5) -> None:
 def run(trajectory: str = "apple_bowl_2",
         n_frames: Optional[int] = None,
         step: int = 3,
+        min_mean_score: float = 0.1,
         make_video: bool = True) -> None:
     data_root = os.path.join(DATA_BASE, trajectory)
     rgb_dir = os.path.join(data_root, "rgb")
-    det_dir = os.path.join(data_root, "detection_h")
+    # Prefer tests/visualization_pipeline/<trajectory>/perception/detection_h/
+    # (where run_pipeline.sh now writes); fall back to the legacy
+    # <dataset>/detection_h/ for pre-migration data.
+    perception_det = os.path.join(
+        SCENEREP_ROOT, "tests", "visualization_pipeline", trajectory,
+        "perception", "detection_h")
+    legacy_det = os.path.join(data_root, "detection_h")
+    det_dir = perception_det if os.path.isdir(perception_det) else legacy_det
     if not (os.path.isdir(rgb_dir) and os.path.isdir(det_dir)):
         print(f"[viz] missing rgb/ or detection_h/ in {data_root}",
               file=sys.stderr)
@@ -284,7 +302,7 @@ def run(trajectory: str = "apple_bowl_2",
         if not os.path.exists(rgb_path):
             continue
         rgb = cv2.cvtColor(cv2.imread(rgb_path), cv2.COLOR_BGR2RGB)
-        dets = _load_detections(det_path)
+        dets = _load_detections(det_path, min_mean_score=min_mean_score)
 
         for det in dets:
             oid = det.get("object_id")
@@ -319,8 +337,12 @@ if __name__ == "__main__":
                     help="max number of raw frames to cover "
                          "(default: all)")
     ap.add_argument("--step", type=int, default=3)
+    ap.add_argument("--min-mean-score", type=float, default=0.1,
+                    help="filter out tracks whose averaged OWL score is "
+                         "below this threshold (default 0.1)")
     ap.add_argument("--no-video", action="store_true")
     args = ap.parse_args()
     run(trajectory=args.trajectory,
         n_frames=args.frames, step=args.step,
+        min_mean_score=args.min_mean_score,
         make_video=not args.no_video)

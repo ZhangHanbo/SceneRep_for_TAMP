@@ -52,7 +52,7 @@ DEFAULT_OBJECTS = [
 # OWL request parameters. Applied uniformly: every frame, every class,
 # no client-side post-processing. The server's own two-stage NMS is
 # the only filter that runs.
-OWL_BBOX_CONF: float = 0.2
+OWL_BBOX_CONF: float = 0.05
 
 # Cross-class NMS IoU: only suppress a box against a differently-labelled
 # box when they overlap this much. Looser (0.7) -> allow overlapping

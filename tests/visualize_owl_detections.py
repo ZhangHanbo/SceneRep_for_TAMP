@@ -110,7 +110,11 @@ def render_histogram(label_totals: Dict[str, int],
 def run(trajectory: str, step: int = 3, make_video: bool = True) -> None:
     data_root = os.path.join(DATA_BASE, trajectory)
     rgb_dir = os.path.join(data_root, "rgb")
-    det_dir = os.path.join(data_root, "detection_boxes")
+    perception_det = os.path.join(
+        SCENEREP_ROOT, "tests", "visualization_pipeline", trajectory,
+        "perception", "detection_boxes")
+    legacy_det = os.path.join(data_root, "detection_boxes")
+    det_dir = perception_det if os.path.isdir(perception_det) else legacy_det
     if not (os.path.isdir(rgb_dir) and os.path.isdir(det_dir)):
         print(f"[viz] missing rgb/ or detection_boxes/ in {data_root}",
               file=sys.stderr)
