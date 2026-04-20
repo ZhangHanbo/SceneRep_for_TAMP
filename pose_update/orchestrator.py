@@ -40,7 +40,7 @@ from pose_update.factor_graph import (
 )
 from pose_update.rbpf_state import RBPFState
 from pose_update.association import (
-    hungarian_associate, oracle_associate, sam2_alpha_from_q_s,
+    hungarian_associate, oracle_associate,
     AssociationResult,
 )
 from pose_update.bernoulli import (
@@ -143,7 +143,10 @@ class BernoulliConfig:
     Attributes:
         association_mode: 'hungarian' for the full Mahalanobis cost with
             chi^2 gating, 'oracle' to short-circuit via ``det['id']``.
-        p_s, p_d, q_s, lambda_c, lambda_b: Bayesian rates (§5, §7, §8).
+        p_s, p_d, lambda_c, lambda_b: Bayesian rates (§5, §7, §8).
+        alpha: SAM2 tracklet-ID matching bonus in chi^2_6 units
+            (paper §6.1 eq:cost_sam2). Default 4.4 (mild tie-breaker
+            toward ID continuity); 0 disables the bonus.
         r_conf, r_min: emission and pruning thresholds on existence r.
         G_in, G_out: chi^2 Huber gates (eq:huber). +inf disables Huber
             re-weighting (w=1 always) and the outer gate effectively
@@ -158,7 +161,7 @@ class BernoulliConfig:
     association_mode: str = "hungarian"
     p_s: float = 1.0
     p_d: float = 0.9
-    q_s: float = 0.9
+    alpha: float = 4.4
     lambda_c: float = 1.0
     lambda_b: float = 1.0
     r_conf: float = 0.5
@@ -173,11 +176,6 @@ class BernoulliConfig:
     K: Optional[np.ndarray] = None
     image_shape: Optional[tuple] = None
 
-    @property
-    def alpha(self) -> float:
-        """SAM2 continuity bonus in Mahalanobis^2 units."""
-        return sam2_alpha_from_q_s(self.q_s)
-
     @classmethod
     def degeneracy(cls, **overrides) -> "BernoulliConfig":
         """Build a config that reproduces the pre-Bernoulli legacy behaviour
@@ -186,7 +184,7 @@ class BernoulliConfig:
             association_mode="oracle",
             p_s=1.0,
             p_d=0.9,
-            q_s=0.5,           # alpha = 0, no SAM2 bonus
+            alpha=0.0,         # no SAM2 bonus
             lambda_c=1.0,
             lambda_b=1.0,
             r_conf=0.0,        # emit everything

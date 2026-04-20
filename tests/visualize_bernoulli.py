@@ -254,7 +254,7 @@ def run(n_frames: int = 200, step: int = 3, rng_seed: int = 42,
 
     bern_cfg = BernoulliConfig(
         association_mode="hungarian",
-        p_s=1.0, p_d=0.9, q_s=0.9,
+        p_s=1.0, p_d=0.9, alpha=4.4,
         lambda_c=1.0, lambda_b=1.0,
         r_conf=0.5, r_min=1e-3,
         G_in=12.59, G_out=25.0,

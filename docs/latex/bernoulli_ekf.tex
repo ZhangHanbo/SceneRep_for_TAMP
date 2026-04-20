@@ -449,82 +449,48 @@ whose world-frame centroid is within a coarse gate of $T^{(i)}_{k|k-1}$);
 measurement. Masks failing the coarse gate for all tracks go to birth
 with a centroid-initialised $\hat T_{k,l}$.
 
-\subsection{SAM2 tracklet ID as a continuity prior}\label{subsec:sam2_id}
+\subsection{SAM2 tracklet ID as a matching cost term}\label{subsec:sam2_id}
 
-When the video segmenter is SAM2, each mask carries a tracklet
-identifier $\tau_{k,l}\!\in\!\mathbb N$ that SAM2 propagates across
-frames for the same object. Empirically the ``same-ID'' event is highly
-informative -- two consecutive masks sharing a tracklet ID almost
-always correspond to the same physical object -- while the
-``different-ID'' event is silent: SAM2 loses track occasionally at
-unpredictable frames, so a changed ID does not imply a different
-object. We capture this asymmetry with one scalar,
-$q_s\!\in\!(0.5,1)$, the per-frame probability that SAM2 preserves an
-object's ID, and we give each track $i$ one auxiliary bookkeeping
-variable $\tau^{(i)}_{k-1}\!\in\!\mathbb N$: the tracklet ID with which
-$i$ was last associated.
-
-Modelling $\tau_{k,l}$ as conditionally independent of the pose
-measurement given track identity, with
-$p(\tau_{k,l}\!=\!\tau^{(i)}_{k-1}\,\big|\,\text{track }i)=q_s$ and
-$p(\tau_{k,l}\!\ne\!\tau^{(i)}_{k-1}\,\big|\,\text{track }i)=1-q_s$,
-the augmented negative log-likelihood of pair $(i,l)$ adds, to $d^2_{il}$,
-\[
-   -2\log p\!\bigl(\tau_{k,l}\,\big|\,\tau^{(i)}_{k-1}\bigr)
-   \;=\;
-   \underbrace{-2\log(1-q_s)}_{\text{same for all }(i,l)}\;-\;
-   \alpha\,\mathbb 1\!\bigl[\tau_{k,l}=\tau^{(i)}_{k-1}\bigr],
-   \qquad
-   \alpha \;\triangleq\; 2\log\frac{q_s}{1-q_s} \;>\;0.
-\]
-The first term is the same constant on every $(i,l)$ pair and drops
-from the $\arg\min$ in \eqref{eq:hung}; only the indicator survives.
-The cost matrix \eqref{eq:cost} is therefore modified by a single
-additive bonus:
+When the segmenter is a SAM2 video session, each mask carries a
+tracklet identifier $\tau_{k,l}\!\in\!\mathbb N$ that SAM2 propagates
+across frames. Empirically, matching IDs are strong evidence of
+same-object identity; re-IDs happen unpredictably after SAM2 loses
+track and carry no identity information. We therefore use $\tau$
+purely as a soft bias on the assignment cost: reward ID continuity,
+but let geometry override when it clearly disagrees. Equip each track
+with one auxiliary bookkeeping scalar
+$\tau^{(i)}_{k-1}\!\in\!\mathbb N$, the tracklet ID with which track
+$i$ was last matched, and replace \eqref{eq:cost} by
 \begin{equation}
    C_{il} \;=\;
    \begin{cases}
       d^2_{il} \;-\; \alpha\,\mathbb 1\!\bigl[\tau_{k,l}=\tau^{(i)}_{k-1}\bigr],
         & \hat\ell_{k,l}=\ell^{(i)}\ \text{and}\ d^2_{il}\le G_{\text{out}},\\
-      +\infty, & \text{otherwise.}
+      +\infty, & \text{otherwise,}
    \end{cases}
    \label{eq:cost_sam2}
 \end{equation}
+with $\alpha\!\ge\!0$ a tunable bonus in $\chi^2_6$ units.
 
 \paragraph{Bookkeeping.} After solving \eqref{eq:hung}, for every
-matched pair $\pi^{\!*}(i)\!=\!l$ set
-$\tau^{(i)}_k\!\leftarrow\!\tau_{k,l}$; for a missed track
-($\pi^{\!*}(i)\!=\!0$) keep $\tau^{(i)}_k\!=\!\tau^{(i)}_{k-1}$ so a
-transient SAM2 drop does not erase the memory (SAM2 may return the
-same ID a few frames later, regaining the bonus); at birth set
-$\tau^{(i_{\mathrm{new}})}_k\!=\!\tau_{k,l}$. A never-previously-seen
-tracklet ID satisfies $\tau_{k,l}\!\ne\!\tau^{(i)}_{k-1}$ for every
-$i$, so its indicator vanishes column-wise and the cost reduces to
-$d^2_{il}$ with no special-case handling.
+matched pair set $\tau^{(i)}_k\!\leftarrow\!\tau_{k,l}$; on a missed
+track leave $\tau^{(i)}_k\!=\!\tau^{(i)}_{k-1}$ (a transient SAM2 drop
+should not erase continuity, since the same ID may return a few
+frames later); at birth set $\tau^{(i_{\mathrm{new}})}_k\!=\!\tau_{k,l}$.
+A tracklet ID never previously seen never equals any
+$\tau^{(i)}_{k-1}$, so the indicator vanishes column-wise and the cost
+reduces to $d^2_{il}$ without special handling.
 
-\paragraph{Scope of the modification.} The ID prior enters only
-through \eqref{eq:cost_sam2}; \S\ref{sec:update}, \S\ref{sec:birth},
-and \S\ref{sec:vis} consume the refined assignment $\pi^{\!*}$
-unchanged. In particular, the existence updates
-\eqref{eq:r_assoc}/\eqref{eq:r_miss} still use only the pose likelihood
-\eqref{eq:ekf_lik}; we do not fold $p(\tau|\tau^{(i)}_{k-1})$ into
-$\mathcal L_{il}$. This avoids double-counting -- $\tau$ and $z_{k,l}$
-are not strictly independent, both being deterministic functions of
-the mask $m_{k,l}$ -- and keeps the existence recursion calibrated to
-pose evidence only, using $\tau$ exclusively as a tie-breaker for
-assignment.
-
-\paragraph{Calibration and degeneracy.} $q_s$ is the empirical
-per-frame probability that SAM2 preserves an object's ID, measured
-once on a held-out sequence. Values in $[0.9,0.95]$ yield
-$\alpha\!\in\![4.4,5.9]$: in $\chi^2_6$ units (gates
-$G_{\text{in}}\!=\!12.59$, $G_{\text{out}}\!=\!25$), this magnitude
-breaks ties between two geometrically ambiguous same-class tracks
-without overriding a clear geometric mismatch. Limits: $\alpha\!=\!0$
-($q_s\!=\!0.5$) recovers \eqref{eq:cost} exactly; $\alpha\!\to\!\infty$
-($q_s\!\to\!1$) hard-binds SAM2 IDs and would force a spurious new
-track on every SAM2 re-ID, which is not recommended given the failure
-mode motivating this subsection.
+\paragraph{Choosing $\alpha$ and scope.} $\alpha\!=\!0$ recovers
+\eqref{eq:cost} exactly. Values $\alpha\!\in\![4,6]$ are a useful
+range: large enough to break ties between two same-class tracks whose
+$d^2$ differ by only a few units, yet small relative to the outer
+gate $G_{\text{out}}\!=\!25$ so a clear geometric mismatch cannot be
+overridden by a persistent ID. $\alpha$ is calibrated on a held-out
+sequence. The tracklet ID enters only \eqref{eq:cost_sam2}, not the
+existence updates \eqref{eq:r_assoc}/\eqref{eq:r_miss}: $\tau$ and
+the pose measurement $z_{k,l}$ are both derived from the same mask
+$m_{k,l}$, and double-counting them in $r$ would mis-calibrate it.
 
 %-----------------------------------------------------------------------------
 \section{Bernoulli measurement update}\label{sec:update}
@@ -751,7 +717,7 @@ seven scalars,
 \[
    p_s\!\in\!(0,1],\quad
    p_d\!\in\!(0,1],\quad
-   q_s\!\in\![0.5,1),\quad
+   \alpha\!\ge\!0,\quad
    \lambda_c\!>\!0,\quad
    \lambda_b\!>\!0,\quad
    r_{\text{conf}}\!\in\!(0,1),\quad
@@ -763,18 +729,17 @@ $\chi^2_6$-quantiles
 $G_{\text{in}}\!=\!\chi^2_6(0.95)\!\approx\!12.59$,
 $G_{\text{out}}\!=\!\chi^2_6(0.9997)\!\approx\!25$. Defaults for static
 manipulation scenes: $p_s\!=\!1$ (rigid objects do not spontaneously
-disappear), $p_d\!=\!0.9$, $q_s\!=\!0.9$ (SAM2 preserves IDs across
-most frames; calibrate on a held-out sequence), $\lambda_c$ estimated
-from a few static frames as the average per-frame detection count
-divided by image area, $\lambda_b\!=\!\lambda_c$,
+disappear), $p_d\!=\!0.9$, $\alpha\!=\!4.4$ (mild tie-break toward
+SAM2 ID continuity; calibrate on a held-out sequence), $\lambda_c$
+estimated from a few static frames as the average per-frame detection
+count divided by image area, $\lambda_b\!=\!\lambda_c$,
 $r_{\text{conf}}\!=\!0.5$, $r_{\min}\!=\!10^{-3}$,
 $P_{\max}\!=\!\operatorname{diag}(\sigma^2_{\text{trans}}\!\cdot\!\bm 1_3,\,\sigma^2_{\text{rot}}\!\cdot\!\bm 1_3)$
 with $\sigma_{\text{trans}}\!=\!0.25\,\mathrm{m},\,\sigma_{\text{rot}}\!=\!\pi/4$.
 Setting $p_s\!<\!1$ models a known per-frame physical-removal hazard
 (e.g.\ unstable platforms, transient occluding clutter) and is purely
-domain-specific; setting $q_s\!=\!0.5$ ($\alpha\!=\!0$) switches off
-the SAM2 ID prior entirely and recovers the pure-geometry cost
-\eqref{eq:cost}.
+domain-specific; setting $\alpha\!=\!0$ switches off the SAM2 ID prior
+entirely and recovers the pure-geometry cost \eqref{eq:cost}.
 
 %-----------------------------------------------------------------------------
 \section{Approximations relative to PMBM}\label{sec:approx}
@@ -862,18 +827,12 @@ truncation).
       is not in standard PMBM but is consistent with a maximum-entropy
       regularisation.
 
-\item \textbf{SAM2 tracklet-ID augmentation} \emph{(modelling choice)}.
-      Standard PMBM consumes only pose-like measurements; we augment
-      each detection with the segmenter's tracklet ID $\tau_{k,l}$
-      and a conditional-independence model
-      $p(\tau|\tau^{(i)}_{k-1}) = q_s^{\mathbb 1[\tau=\tau^{(i)}_{k-1}]}(1-q_s)^{\mathbb 1[\tau\ne\tau^{(i)}_{k-1}]}$
-      (\S\ref{subsec:sam2_id}). The ID likelihood enters the association
-      cost \eqref{eq:cost_sam2} as an additive $\alpha$-bonus on matching
-      IDs and is intentionally \emph{not} folded into the existence
-      update, since $\tau$ and $z_{k,l}$ are not strictly independent
-      (both derive from $m_{k,l}$) and double-counting would
-      mis-calibrate \eqref{eq:r_assoc}. Internally Bayesian under the
-      model; $\alpha\!=\!0$ recovers \eqref{eq:cost}.
+\item \textbf{SAM2 tracklet-ID matching bonus} \emph{(modelling choice)}.
+      Standard PMBM consumes only pose-like measurements; we add an
+      additive $\alpha$-bonus to the Hungarian cost on pairs whose
+      SAM2 tracklet IDs agree (\S\ref{subsec:sam2_id}). The bonus
+      enters the assignment only; \eqref{eq:r_assoc}/\eqref{eq:r_miss}
+      are unchanged. $\alpha\!=\!0$ recovers \eqref{eq:cost}.
 
 \end{enumerate}
 
