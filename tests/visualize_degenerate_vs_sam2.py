@@ -357,8 +357,14 @@ def run(trajectory: str = "apple_bowl_2",
             held_obj = None
 
         T_ec = handles["ee_poses"][idx]
+        # Rigid-attachment predict needs gripper-in-base-frame (T_bg).
+        # This test harness treats camera == base (PassThroughSlam feeds
+        # camera_pose.txt in as T_wb), and ee_pose.txt is stored as ee-in-
+        # camera. Therefore T_bg = T_ec here. Without this, the held object
+        # stays glued to its initial world pose when the robot moves.
         orch.step(rgb, depth, dets,
-                   {"phase": phase, "held_obj_id": held_obj}, T_ec=T_ec)
+                   {"phase": phase, "held_obj_id": held_obj},
+                   T_ec=T_ec, T_bg=T_ec)
 
         objects = orch.objects
         T_cw = handles["cam_poses"][idx]

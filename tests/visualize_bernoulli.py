@@ -280,14 +280,17 @@ def run(n_frames: int = 200, step: int = 3, rng_seed: int = 42,
         rgb, depth, dets, grip, T_ec_leg = _collect_inputs(legacy, idx, local_i)
         if rgb is None:
             continue
-        legacy.orchestrator.step(rgb, depth, dets, grip, T_ec=T_ec_leg)
+        # T_bg = T_ec under the test-harness convention (camera == base).
+        legacy.orchestrator.step(rgb, depth, dets, grip,
+                                  T_ec=T_ec_leg, T_bg=T_ec_leg)
 
         # Drive Bernoulli with the SAME inputs.
         rgb_b, depth_b, dets_b, grip_b, T_ec_b = _collect_inputs(bern, idx, local_i)
         # If any of the bern-side helpers mutate state (they do: gripper
         # state machine), we end up with two separate copies -- that's why
         # we don't share. rgb/depth are independent of the runner.
-        bern.orchestrator.step(rgb_b, depth_b, dets_b, grip_b, T_ec=T_ec_b)
+        bern.orchestrator.step(rgb_b, depth_b, dets_b, grip_b,
+                                T_ec=T_ec_b, T_bg=T_ec_b)
 
         # Snapshot outputs.
         legacy_objs = legacy.orchestrator.objects
