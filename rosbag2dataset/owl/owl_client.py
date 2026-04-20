@@ -234,8 +234,10 @@ def main() -> int:
                     help="dataset root; defaults to $DATASET_PATH or '.'")
     ap.add_argument("--out-dir", default="detection_boxes",
                     help="output subdir (default: detection_boxes)")
-    ap.add_argument("--objects", nargs="*", default=DEFAULT_OBJECTS,
-                    help=f"text queries (default: {DEFAULT_OBJECTS})")
+    ap.add_argument("--objects", nargs="*", default=None,
+                    help=f"text queries. If omitted, look for "
+                         f"<dataset>/det_config.json and read its "
+                         f"'objects' key; fall back to {DEFAULT_OBJECTS}.")
     ap.add_argument("--server", default=OWL_SERVER_URL,
                     help="OWL server URL (override with $OWL_SERVER_URL)")
     ap.add_argument("--thresh", type=float, default=OWL_BBOX_CONF,
@@ -257,6 +259,27 @@ def main() -> int:
     if not os.path.isdir(dataset_dir):
         raise FileNotFoundError(f"no such dataset: {dataset_dir}")
 
+    # Resolve vocabulary: explicit --objects wins; else read
+    # <dataset>/det_config.json["objects"]; else DEFAULT_OBJECTS.
+    if args.objects is not None and len(args.objects) > 0:
+        objects = list(args.objects)
+        obj_source = "CLI"
+    else:
+        cfg_path = os.path.join(dataset_dir, "det_config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r") as f:
+                cfg = json.load(f)
+            cfg_objs = cfg.get("objects")
+            if isinstance(cfg_objs, list) and len(cfg_objs) > 0:
+                objects = list(cfg_objs)
+                obj_source = f"det_config.json ({cfg_path})"
+            else:
+                objects = list(DEFAULT_OBJECTS)
+                obj_source = "default (det_config.json missing 'objects')"
+        else:
+            objects = list(DEFAULT_OBJECTS)
+            obj_source = "default (no det_config.json)"
+
     rgb_dir = os.path.join(dataset_dir, "rgb")
     out_dir = os.path.join(dataset_dir, args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
@@ -267,8 +290,8 @@ def main() -> int:
         print(f"no RGB frames in {rgb_dir}")
         return 1
 
-    print(f"[owl] server={args.server}  objects={args.objects}  "
-          f"{len(files)} frames")
+    print(f"[owl] server={args.server}  objects={objects}  "
+          f"(source: {obj_source})  {len(files)} frames")
 
     total_detections = 0
     t0 = time.time()
@@ -283,7 +306,7 @@ def main() -> int:
                 rgb_path=os.path.join(rgb_dir, fname),
                 frame_idx=fid,
                 output_folder=out_dir,
-                text_queries=args.objects,
+                text_queries=objects,
                 server_url=args.server,
                 thresh=args.thresh,
                 nms_cross=args.nms_cross,
