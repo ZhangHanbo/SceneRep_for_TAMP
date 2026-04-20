@@ -53,6 +53,7 @@ from tests.visualize_sam2_observations import (
 from tests.test_orchestrator_integration import (
     _build_T_co_from_mask, _gripper_state_from_distance, _load_pose_txt,
 )
+from tests.visualize_pipeline import resolve_held_by_proximity
 from pose_update.orchestrator import (
     TwoTierOrchestrator, TriggerConfig, BernoulliConfig,
 )
@@ -340,13 +341,18 @@ def run(trajectory: str = "apple_bowl_2",
         last_finger_d = finger_d
         last_phase = phase
 
-        # Light held-object resolution so the tracker's rigid-attachment
-        # predict gets the right object when holding.
-        if phase == "grasping" and held_obj is None:
-            T_cw = handles["cam_poses"][idx]
+        # Held-object resolution via cluster (point-cloud-rim) distance:
+        # the bowl's rim points are physically closer to the gripper than
+        # the apple's surface inside it, so the bowl wins the 5th-percentile
+        # test even though its centroid is farther from the EE.
+        if phase == "grasping" and held_obj is None and dets:
             T_ec = handles["ee_poses"][idx]
-            T_ew = T_cw @ T_ec
-            if dets:
+            ee_cam = T_ec[:3, 3]
+            held_obj = resolve_held_by_proximity(
+                dets, depth, ee_cam, cam_K=K)
+            if held_obj is None:
+                T_cw = handles["cam_poses"][idx]
+                T_ew = T_cw @ T_ec
                 best = min(
                     ((d["id"], np.linalg.norm(
                         (T_cw @ d["T_co"])[:3, 3] - T_ew[:3, 3]))

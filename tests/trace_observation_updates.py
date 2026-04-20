@@ -54,6 +54,7 @@ from tests.test_orchestrator_integration import (
     _build_T_co_from_mask, _gripper_state_from_distance, _load_pose_txt, K,
 )
 from tests.visualize_sam2_observations import _load_detections
+from tests.visualize_pipeline import resolve_held_by_proximity
 from pose_update.orchestrator import (
     TwoTierOrchestrator, TriggerConfig, BernoulliConfig,
 )
@@ -164,13 +165,23 @@ def run_once(trajectory: str, indices: List[int], pass_T_bg: bool,
         last_phase = phase
 
         if phase == "grasping" and held_obj is None and dets:
-            T_cw = cam_poses[idx]
+            # Cluster-distance resolver: picks the object whose point cloud
+            # has the lowest 5th-percentile distance to the EE -- so the
+            # bowl's rim wins over the apple's centroid inside it.
             T_ec = ee_poses[idx]
-            T_ew = T_cw @ T_ec
-            best = min(((d["id"], np.linalg.norm(
-                (T_cw @ d["T_co"])[:3, 3] - T_ew[:3, 3])) for d in dets),
-                       key=lambda kv: kv[1])
-            held_obj = best[0]
+            ee_cam = T_ec[:3, 3]   # EE position in camera frame
+            held_obj = resolve_held_by_proximity(
+                dets, depth, ee_cam, cam_K=K)
+            if held_obj is None and dets:
+                # If every candidate is outside max_dist, fall back to the
+                # nearest centroid so the held-obj state machine can
+                # still fire (this mirrors the integration test).
+                T_cw = cam_poses[idx]
+                T_ew = T_cw @ T_ec
+                best = min(((d["id"], np.linalg.norm(
+                    (T_cw @ d["T_co"])[:3, 3] - T_ew[:3, 3]))
+                    for d in dets), key=lambda kv: kv[1])
+                held_obj = best[0]
         elif phase == "idle":
             held_obj = None
 
