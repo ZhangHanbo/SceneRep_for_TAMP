@@ -65,7 +65,7 @@ if _REPO_ROOT not in sys.path:
 
 from rosbag2dataset.server_configs import (  # noqa: E402
     OWL_SERVER_URL, OWL_DETECT_PATH, DEFAULT_OBJECTS,
-    OWL_BBOX_CONF, OWL_NMS_IOU,
+    OWL_BBOX_CONF, OWL_NMS_CROSS, OWL_NMS_CAT,
 )
 
 
@@ -85,8 +85,8 @@ def call_owl(rgb: np.ndarray,
              bbox_conf_threshold: float = OWL_BBOX_CONF,
              server_url: str = OWL_SERVER_URL,
              with_nms: bool = True,
-             nms_threshold: float = OWL_NMS_IOU,
-             nms_cat_threshold: float = OWL_NMS_IOU,
+             nms_threshold: float = OWL_NMS_CROSS,
+             nms_cat_threshold: float = OWL_NMS_CAT,
              timeout: float = 60.0) -> Tuple[List[str], np.ndarray, np.ndarray]:
     """POST one RGB frame to the OWL server.
 
@@ -123,7 +123,8 @@ def process_frame(rgb_path: str,
                   text_queries: List[str],
                   server_url: str,
                   thresh: float = OWL_BBOX_CONF,
-                  nms_iou: float = OWL_NMS_IOU,
+                  nms_cross: float = OWL_NMS_CROSS,
+                  nms_cat: float = OWL_NMS_CAT,
                   with_nms: bool = True) -> int:
     img_bgr = cv2.imread(rgb_path)
     if img_bgr is None:
@@ -135,8 +136,8 @@ def process_frame(rgb_path: str,
     box_names, bboxes_norm, scores = call_owl(
         img, text_queries,
         bbox_conf_threshold=thresh,
-        nms_threshold=nms_iou,
-        nms_cat_threshold=nms_iou,
+        nms_threshold=nms_cross,
+        nms_cat_threshold=nms_cat,
         server_url=server_url, with_nms=with_nms,
     )
 
@@ -197,8 +198,10 @@ def main() -> int:
     ap.add_argument("--thresh", type=float, default=OWL_BBOX_CONF,
                     help=f"bbox confidence threshold (uniform over frames "
                          f"and classes, default {OWL_BBOX_CONF})")
-    ap.add_argument("--nms-iou", type=float, default=OWL_NMS_IOU,
-                    help=f"server-side NMS IoU (default {OWL_NMS_IOU})")
+    ap.add_argument("--nms-cross", type=float, default=OWL_NMS_CROSS,
+                    help=f"cross-class NMS IoU (default {OWL_NMS_CROSS})")
+    ap.add_argument("--nms-cat", type=float, default=OWL_NMS_CAT,
+                    help=f"per-class NMS IoU (default {OWL_NMS_CAT})")
     ap.add_argument("--no-nms", action="store_true",
                     help="disable server-side NMS entirely")
     args = ap.parse_args()
@@ -240,7 +243,8 @@ def main() -> int:
                 text_queries=args.objects,
                 server_url=args.server,
                 thresh=args.thresh,
-                nms_iou=args.nms_iou,
+                nms_cross=args.nms_cross,
+                nms_cat=args.nms_cat,
                 with_nms=not args.no_nms,
             )
             total_detections += n

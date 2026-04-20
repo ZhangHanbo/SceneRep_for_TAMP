@@ -50,7 +50,15 @@ DEFAULT_OBJECTS = [
 ]
 
 # OWL request parameters. Applied uniformly: every frame, every class,
-# no client-side post-processing. The server's own NMS at this IoU is
+# no client-side post-processing. The server's own two-stage NMS is
 # the only filter that runs.
 OWL_BBOX_CONF: float = 0.2
-OWL_NMS_IOU:   float = 0.5
+
+# Cross-class NMS IoU: only suppress a box against a differently-labelled
+# box when they overlap this much. Looser (0.7) -> allow overlapping
+# classes (e.g. the same region labelled 'apple' and 'tomato') to coexist.
+OWL_NMS_CROSS: float = 0.7
+
+# Per-class NMS IoU: suppress same-class duplicates that overlap this
+# much. Tighter (0.5) -> dedupe redundant boxes aggressively.
+OWL_NMS_CAT:   float = 0.5
