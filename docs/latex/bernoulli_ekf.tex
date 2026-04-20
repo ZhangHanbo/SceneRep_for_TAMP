@@ -88,9 +88,9 @@ class label $\hat\ell_{k,l}\!\in\!\mathcal L$, calibrated detection
 score $\hat s_{k,l}\!\in\![0,1]$, and a video-tracklet identifier
 $\tau_{k,l}\!\in\!\mathbb N$ issued by the segmenter (SAM2), which
 mostly preserves object identity across frames but is occasionally
-reset when the segmenter loses track -- its use as a soft association
-prior is detailed in \S\ref{subsec:sam2_id}. All four fields are
-produced by the open-vocabulary detector + video-segmenter pipeline.
+reset when the segmenter loses track -- it enters the assignment cost
+\eqref{eq:cost} as a matching-ID bonus. All four fields are produced
+by the open-vocabulary detector + video-segmenter pipeline.
 \textbf{Detections live in pixel space; they do not carry 3D pose
 information.}
 
@@ -400,97 +400,66 @@ not maintain a continuous Poisson birth intensity.
 \section{Data association}\label{sec:data-assoc}
 %-----------------------------------------------------------------------------
 
-For every pair $(i,l)\!\in\!\mathcal I_{k-1}\!\times\!\{1,\dots,M_k\}$
-compute the per-pair innovation quantities
+For every track--detection pair $(i,l)\!\in\!\mathcal I_{k-1}\!\times\!\{1,\dots,M_k\}$ compute
 \begin{equation}
-   \nu_{il} \;=\; \Log\!\bigl(T^{(i)\,-1}_{k|k-1}\,\hat T_{k,l}\bigr),\qquad
-   S_{il}   \;=\; P^{(i)}_{k|k-1} + \hat R_{k,l},\qquad
-   d^2_{il} \;=\; \nu_{il}^\top S_{il}^{-1}\nu_{il},
+   \nu_{il} = \Log\!\bigl(T^{(i)\,-1}_{k|k-1}\hat T_{k,l}\bigr),\quad
+   S_{il}   = P^{(i)}_{k|k-1} + \hat R_{k,l},\quad
+   d^2_{il} = \nu_{il}^\top S_{il}^{-1}\nu_{il},
    \label{eq:innov_pair}
 \end{equation}
-i.e.\ \eqref{eq:ekf_innov}--\eqref{eq:mahal} under the substitution
-$(z_k,R_k)\!\leftarrow\!(\hat T_{k,l},\hat R_{k,l})$ and track-state
-substitution $(T_{k|k-1},P_{k|k-1})\!\leftarrow\!(T^{(i)}_{k|k-1},
-P^{(i)}_{k|k-1})$. Define the cost matrix
-$C\!\in\!(\R\cup\{+\infty\})^{|\mathcal I_{k-1}|\times M_k}$
-\begin{equation}
-   C_{il} \;=\;
-   \begin{cases}
-       d^2_{il}, & \hat\ell_{k,l}=\ell^{(i)}\ \text{and}\ d^2_{il}\le G_{\text{out}},\\
-       +\infty,  & \text{otherwise},
-   \end{cases}\label{eq:cost}
-\end{equation}
-so that infeasible pairs (wrong label, or outside the outer gate) are
-forbidden. Let $\pi:\mathcal I_{k-1}\to\{0,1,\dots,M_k\}$ denote a
-candidate assignment, with $\pi(i)\!=\!0$ encoding ``track $i$
-unassigned'' and a one-to-one constraint on positive values. Define the
-linear-assignment problem
-\begin{equation}
-   \pi^{\!*} \;=\;
-   \argmin_{\pi}\;
-   \sum_{i\in\mathcal I_{k-1}\,:\,\pi(i)>0} C_{i,\pi(i)}
-   \qquad\text{s.t.}\quad
-   \pi(i)=\pi(j)>0 \Longrightarrow i=j.
-   \label{eq:hung}
-\end{equation}
-\eqref{eq:hung} is solved with scipy's \texttt{linear\_sum\_assignment}
-(Jonker--Volgenant); any assignment that would incur cost $+\infty$ is
-rewritten as unassigned ($\pi^{\!*}(i)\!=\!0$). Measurements with no
-positive-assignment track are available for birth (\S\ref{sec:birth}).
-This is the MAP collapse of the PMBM mixture over associations to its
-single highest-weight component.
-
-Note on circularity: $d^2_{il}$ depends on $(\hat T_{k,l},\hat R_{k,l})$,
-which is produced by ICP against $\mathcal G^{(i)}_{k-1}$ -- which in
-turn assumes we already know $i$. The orchestrator breaks this loop by
-running ICP once per track on a \emph{restricted} candidate set (masks
-whose world-frame centroid is within a coarse gate of $T^{(i)}_{k|k-1}$);
-\eqref{eq:cost} then refines the selection using the refined pose
-measurement. Masks failing the coarse gate for all tracks go to birth
-with a centroid-initialised $\hat T_{k,l}$.
-
-\subsection{SAM2 tracklet ID as a matching cost term}\label{subsec:sam2_id}
-
-When the segmenter is a SAM2 video session, each mask carries a
-tracklet identifier $\tau_{k,l}\!\in\!\mathbb N$ that SAM2 propagates
-across frames. Empirically, matching IDs are strong evidence of
-same-object identity; re-IDs happen unpredictably after SAM2 loses
-track and carry no identity information. We therefore use $\tau$
-purely as a soft bias on the assignment cost: reward ID continuity,
-but let geometry override when it clearly disagrees. Equip each track
-with one auxiliary bookkeeping scalar
-$\tau^{(i)}_{k-1}\!\in\!\mathbb N$, the tracklet ID with which track
-$i$ was last matched, and replace \eqref{eq:cost} by
+i.e.\ \eqref{eq:ekf_innov}--\eqref{eq:mahal} with
+$(z_k,R_k)\!\leftarrow\!(\hat T_{k,l},\hat R_{k,l})$ and
+$(T_{k|k-1},P_{k|k-1})\!\leftarrow\!(T^{(i)}_{k|k-1},P^{(i)}_{k|k-1})$.
+The assignment cost matrix
+$C\!\in\!(\R\cup\{+\infty\})^{|\mathcal I_{k-1}|\times M_k}$ combines
+the Mahalanobis distance with a class-label feasibility gate, a
+$\chi^2_6$ outer gate, and -- when the segmenter exposes a tracklet
+identifier $\tau_{k,l}$ -- an additive bonus on matching IDs:
 \begin{equation}
    C_{il} \;=\;
    \begin{cases}
       d^2_{il} \;-\; \alpha\,\mathbb 1\!\bigl[\tau_{k,l}=\tau^{(i)}_{k-1}\bigr],
         & \hat\ell_{k,l}=\ell^{(i)}\ \text{and}\ d^2_{il}\le G_{\text{out}},\\
-      +\infty, & \text{otherwise,}
+      +\infty, & \text{otherwise.}
    \end{cases}
-   \label{eq:cost_sam2}
+   \label{eq:cost}
 \end{equation}
-with $\alpha\!\ge\!0$ a tunable bonus in $\chi^2_6$ units.
+Here $\tau^{(i)}_{k-1}\!\in\!\mathbb N\cup\{\varnothing\}$ is the
+tracklet ID with which track $i$ was last matched ($\varnothing$ if
+never matched, in which case the indicator is $0$), and
+$\alpha\!\ge\!0$ is a tunable bonus in $\chi^2_6$ units ($\alpha\!=\!0$
+drops the ID term; the paper default $\alpha\!=\!4.4$ breaks ties
+between two same-class tracks whose $d^2$ differ by a few units
+without overriding a clear geometric mismatch).
 
-\paragraph{Bookkeeping.} After solving \eqref{eq:hung}, for every
-matched pair set $\tau^{(i)}_k\!\leftarrow\!\tau_{k,l}$; on a missed
-track leave $\tau^{(i)}_k\!=\!\tau^{(i)}_{k-1}$ (a transient SAM2 drop
-should not erase continuity, since the same ID may return a few
-frames later); at birth set $\tau^{(i_{\mathrm{new}})}_k\!=\!\tau_{k,l}$.
-A tracklet ID never previously seen never equals any
-$\tau^{(i)}_{k-1}$, so the indicator vanishes column-wise and the cost
-reduces to $d^2_{il}$ without special handling.
+The MAP assignment is
+\begin{equation}
+   \pi^{\!*} \;=\;
+   \argmin_{\pi}\;
+   \sum_{i\in\mathcal I_{k-1}\,:\,\pi(i)>0} C_{i,\pi(i)},\qquad
+   \text{s.t.}\ \pi(i)=\pi(j)>0\Rightarrow i=j,
+   \label{eq:hung}
+\end{equation}
+with $\pi:\mathcal I_{k-1}\to\{0,1,\dots,M_k\}$ and $\pi(i)\!=\!0$
+encoding ``track $i$ unassigned''. \eqref{eq:hung} is solved with
+scipy's \texttt{linear\_sum\_assignment} (Jonker--Volgenant); any
+cost-$+\infty$ entry forces $\pi^{\!*}(i)\!=\!0$. After solving, set
+$\tau^{(i)}_k\!\leftarrow\!\tau_{k,l}$ on matched pairs and leave
+$\tau^{(i)}_k\!=\!\tau^{(i)}_{k-1}$ on misses (so a transient tracklet
+drop does not erase the memory); birth initialises
+$\tau^{(i_{\mathrm{new}})}_k\!=\!\tau_{k,l}$. Measurements with no
+positive-assignment track are available for birth (\S\ref{sec:birth}).
+\eqref{eq:hung} is the MAP collapse of the PMBM mixture over global
+associations (JIPDA reduction).
 
-\paragraph{Choosing $\alpha$ and scope.} $\alpha\!=\!0$ recovers
-\eqref{eq:cost} exactly. Values $\alpha\!\in\![4,6]$ are a useful
-range: large enough to break ties between two same-class tracks whose
-$d^2$ differ by only a few units, yet small relative to the outer
-gate $G_{\text{out}}\!=\!25$ so a clear geometric mismatch cannot be
-overridden by a persistent ID. $\alpha$ is calibrated on a held-out
-sequence. The tracklet ID enters only \eqref{eq:cost_sam2}, not the
-existence updates \eqref{eq:r_assoc}/\eqref{eq:r_miss}: $\tau$ and
-the pose measurement $z_{k,l}$ are both derived from the same mask
-$m_{k,l}$, and double-counting them in $r$ would mis-calibrate it.
+Note on circularity: $d^2_{il}$ depends on
+$(\hat T_{k,l},\hat R_{k,l})$, which is itself produced by ICP against
+$\mathcal G^{(i)}_{k-1}$. The orchestrator breaks the loop by running
+ICP once per track on a coarsely-gated candidate set (masks whose
+world-frame centroid is within a fixed window of $T^{(i)}_{k|k-1}$);
+\eqref{eq:cost} then refines the selection using the resulting pose
+measurement. Masks failing the coarse gate for all tracks go to birth
+with a centroid-initialised $\hat T_{k,l}$.
 
 %-----------------------------------------------------------------------------
 \section{Bernoulli measurement update}\label{sec:update}
@@ -674,7 +643,7 @@ The output at frame $k$ is the labelled MAP estimate
 
 \begin{enumerate}[leftmargin=2em]
    \item \textbf{Predict.} For each $i\in\mathcal I_{k-1}$: state via \eqref{eq:ekf_T_pred}--\eqref{eq:ekf_P_pred}; existence via \eqref{eq:bern_pred_r}.
-   \item \textbf{Measure.} For every mask $m_{k,l}$ back-project to a world-frame point cloud $\mathcal C_{k,l}$. For each candidate track $i$ passing a coarse gate, run colored ICP to obtain $(\hat T_{k,l}^{(i)},\hat R_{k,l}^{(i)})$; compute $d^2_{il}$ via \eqref{eq:innov_pair} and $C_{il}$ via \eqref{eq:cost_sam2}.
+   \item \textbf{Measure.} For every mask $m_{k,l}$ back-project to a world-frame point cloud $\mathcal C_{k,l}$. For each candidate track $i$ passing a coarse gate, run colored ICP to obtain $(\hat T_{k,l}^{(i)},\hat R_{k,l}^{(i)})$; compute $d^2_{il}$ via \eqref{eq:innov_pair} and $C_{il}$ via \eqref{eq:cost}.
    \item \textbf{Associate.} Solve \eqref{eq:hung} for $\pi^{\!*}$.
    \item \textbf{Update each track $i$.}
          \begin{itemize}[topsep=0pt]
@@ -698,7 +667,7 @@ The output at frame $k$ is the labelled MAP estimate
    \item Predict \eqref{eq:bern_pred_r}, \eqref{eq:ekf_T_pred}--\eqref{eq:ekf_P_pred} edits \texttt{rbpf\_state.predict\_objects};
          the saturation projector $\Phi$ replaces the bucket-switching
          in \texttt{process\_noise\_for\_phase}.
-   \item Cost matrix \eqref{eq:cost_sam2}, assignment \eqref{eq:hung},
+   \item Cost matrix \eqref{eq:cost}, assignment \eqref{eq:hung},
          and per-pair update \eqref{eq:r_assoc} + Huber-weighted EKF
          update replace the hard upstream-ID lookup in
          \texttt{orchestrator.\_fast\_tier} with a soft, ID-bonused
@@ -827,23 +796,15 @@ truncation).
       is not in standard PMBM but is consistent with a maximum-entropy
       regularisation.
 
-\item \textbf{SAM2 tracklet-ID matching bonus} \emph{(modelling choice)}.
-      Standard PMBM consumes only pose-like measurements; we add an
-      additive $\alpha$-bonus to the Hungarian cost on pairs whose
-      SAM2 tracklet IDs agree (\S\ref{subsec:sam2_id}). The bonus
-      enters the assignment only; \eqref{eq:r_assoc}/\eqref{eq:r_miss}
-      are unchanged. $\alpha\!=\!0$ recovers \eqref{eq:cost}.
-
 \end{enumerate}
 
 \paragraph{What this buys, what this costs.}
 Approximations A.1 and A.2 are exactly the JIPDA reduction of PMBM,
 known to be a tight approximation when MAP associations are
 unambiguous and lossy when crossing tracks induce hypothesis ambiguity.
-Modelling choices A.3 -- A.6 and A.9 specialise or enrich the standard
-PMBM model to our domain and are reversible: restoring the PPP,
-Murty K-best mixture, spatially-adaptive birth, per-class $p_s$, or
-disabling the SAM2 tracklet-ID bonus ($\alpha\!=\!0$) would re-recover
+Modelling choices A.3 -- A.6 specialise the standard PMBM model to
+our domain and are reversible: restoring the PPP, Murty K-best
+mixture, spatially-adaptive birth, or per-class $p_s$ would re-recover
 full PMBM at proportional computational cost. Linearisations A.7 --
 A.8 are inherent to the EKF-on-Lie-group and covariance-bounded
 layer; they do not change the multi-target structure of the
