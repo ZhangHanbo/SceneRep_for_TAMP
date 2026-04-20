@@ -57,8 +57,12 @@ if _REPO_ROOT not in sys.path:
 
 from rosbag2dataset.server_configs import (  # noqa: E402
     SAM2_SERVER_URL,
+    # batch / offline (kept for back-compat; not used by the streaming driver)
     SAM2_START_PATH, SAM2_ADD_BOX_PATH,
     SAM2_PROPAGATE_PATH, SAM2_CLOSE_PATH,
+    # streaming / online
+    SAM2_STREAM_INIT_PATH, SAM2_STREAM_FRAME_PATH,
+    SAM2_STREAM_ADD_BOX_PATH, SAM2_STREAM_CLOSE_PATH,
 )
 
 
@@ -263,6 +267,98 @@ class PropagatedFrame:
     object_bboxes: Dict[int, List[int]]
 
 
+class SAM2StreamClient:
+    """Thin HTTP client for the SAM2 streaming server.
+
+    Model: one frame at a time. Each /sam2_stream_frame appends the
+    frame to the session, propagates every currently-seeded object into
+    it via the memory bank, and returns per-object masks immediately.
+    Prompts can be dropped at ANY frame_idx via /sam2_stream_add_box;
+    those objects start showing up in the next frame's propagated mask
+    set.
+    """
+    def __init__(self, server_url: str = SAM2_SERVER_URL,
+                 timeout_init: float = 60.0,
+                 timeout_frame: float = 120.0,
+                 timeout_prompt: float = 60.0,
+                 timeout_close: float = 30.0):
+        self.server_url = server_url.rstrip("/")
+        self.t_init = timeout_init
+        self.t_frame = timeout_frame
+        self.t_prompt = timeout_prompt
+        self.t_close = timeout_close
+        self.session_id: Optional[str] = None
+
+    # -- session lifecycle --------------------------------------------------
+
+    def start(self) -> dict:
+        r = _post(self.server_url + SAM2_STREAM_INIT_PATH,
+                  {}, timeout=self.t_init)
+        self.session_id = r["session_id"]
+        return r
+
+    def close(self) -> None:
+        if self.session_id is None:
+            return
+        try:
+            _post(self.server_url + SAM2_STREAM_CLOSE_PATH,
+                  {"session_id": self.session_id},
+                  timeout=self.t_close)
+        except Exception as e:
+            print(f"[sam2-stream] close failed: {e}")
+        self.session_id = None
+
+    def __enter__(self) -> "SAM2StreamClient":
+        return self
+
+    def __exit__(self, *exc) -> None:
+        self.close()
+
+    # -- frame / prompt -----------------------------------------------------
+
+    def frame(self, img_rgb: np.ndarray) -> PropagatedFrame:
+        """Feed one frame; return masks for every currently-seeded track
+        propagated into this frame."""
+        assert self.session_id is not None, "session not started"
+        r = _post(
+            self.server_url + SAM2_STREAM_FRAME_PATH, {
+                "session_id": self.session_id,
+                "image":      _encode_png(img_rgb),
+            }, timeout=self.t_frame)
+        masks: Dict[int, np.ndarray] = {}
+        bboxes: Dict[int, List[int]] = {}
+        for o in r.get("objects", []):
+            oid = int(o["object_id"])
+            m = _decode_mask(o.get("mask"))
+            if m is None:
+                continue
+            masks[oid] = m
+            bboxes[oid] = o.get("bbox") or _bbox_from_mask(m)
+        return PropagatedFrame(object_masks=masks, object_bboxes=bboxes)
+
+    def add_box(self, frame_idx: int, box: List[int],
+                 object_id: Optional[int] = None) -> int:
+        """Seed a new object at frame_idx with a bbox prompt. If
+        object_id is None the server mints a fresh one. Returns the
+        (resolved) object id.
+
+        The new object will not appear in `self.frame(frame_idx)`'s
+        return -- SAM2 propagates it into subsequent frames, so its
+        first SAM2-predicted mask is at frame_idx + 1.
+        """
+        assert self.session_id is not None, "session not started"
+        payload = {
+            "session_id": self.session_id,
+            "frame_idx":  int(frame_idx),
+            "box":        [float(v) for v in box],
+        }
+        if object_id is not None:
+            payload["object_id"] = int(object_id)
+        r = _post(self.server_url + SAM2_STREAM_ADD_BOX_PATH, payload,
+                   timeout=self.t_prompt)
+        return int(r["object_id"])
+
+
 class SAM2Client:
     def __init__(self, server_url: str = SAM2_SERVER_URL,
                  timeout_start: float = 300.0,
@@ -340,6 +436,171 @@ class SAM2Client:
 # ---------------------------------------------------------------------------
 # Driver
 # ---------------------------------------------------------------------------
+
+def track_dataset_streaming(dataset_root: str,
+                             server_url: str = SAM2_SERVER_URL,
+                             det_dir_name: str = "detection_boxes",
+                             out_dir_name: str = "detection_h",
+                             new_obj_iou: float = 0.3,
+                             min_score: float = 0.0,
+                             enforce_label_match: bool = True) -> None:
+    """Streaming SAM2 tracker.
+
+    Per-frame loop:
+      1. /sam2_stream_frame  --> propagated masks for all existing tracks
+      2. Match OWL detections at this frame to propagated masks via
+         (same-label AND bbox-vs-mask IoU >= new_obj_iou).
+         Matched: record the OWL score on the track (for mean_score).
+         Unmatched: seed a new track via /sam2_stream_add_box at this
+         frame. The new track starts being propagated from next frame.
+      3. Write detection_h/detection_{fid:06d}_final.json with the
+         masks returned in step 1.
+
+    No iteration loop, no MAX_NEW_PER_ITER cap, no cluster dedupe:
+    every new OWL detection at every frame gets a chance to become a
+    track, and SAM2's memory bank enforces temporal consistency.
+    """
+    rgb_dir = os.path.join(dataset_root, "rgb")
+    det_dir = (det_dir_name if os.path.isabs(det_dir_name)
+               else os.path.join(dataset_root, det_dir_name))
+    out_dir = (out_dir_name if os.path.isabs(out_dir_name)
+               else os.path.join(dataset_root, out_dir_name))
+    os.makedirs(out_dir, exist_ok=True)
+
+    print(f"[sam2-stream] dataset={dataset_root}  server={server_url}")
+    frame_ids, frames = _load_frames(rgb_dir)
+    if not frames:
+        raise FileNotFoundError(f"no RGB in {rgb_dir}")
+    owl_dets = _load_owl_detections(det_dir, min_score=min_score)
+    mean_ow = np.mean([len(v) for v in owl_dets.values()] or [0])
+    print(f"[sam2-stream] frames={len(frames)}  "
+          f"owl-dets-per-frame (mean)={mean_ow:.1f}")
+
+    tracks: Dict[int, TrackState] = {}
+    t0 = time.time()
+
+    with SAM2StreamClient(server_url=server_url) as sam2:
+        sam2.start()
+
+        for i, fid in enumerate(frame_ids):
+            rgb = frames[i]
+
+            # (1) propagate existing tracks into this frame
+            prop = sam2.frame(rgb)
+
+            # (2) OWL <-> propagated-mask matching (label + IoU gate)
+            owls = owl_dets.get(fid, [])
+            matched_det_idx: set = set()
+            for j, owl in enumerate(owls):
+                best_iou = 0.0
+                best_oid: Optional[int] = None
+                for oid, mask in prop.object_masks.items():
+                    t_label = tracks[oid].label if oid in tracks else None
+                    if enforce_label_match and t_label != owl.label:
+                        continue
+                    iou = _bbox_mask_iou(owl.box, mask)
+                    if iou > best_iou:
+                        best_iou = iou
+                        best_oid = oid
+                if best_iou >= new_obj_iou and best_oid is not None:
+                    # record observed OWL score on the matched track
+                    tracks[best_oid].scores_by_frame[i] = owl.score
+                    matched_det_idx.add(j)
+
+            # (3) seed new tracks for unmatched OWL detections
+            added_this_frame = 0
+            for j, owl in enumerate(owls):
+                if j in matched_det_idx:
+                    continue
+                obj_id = sam2.add_box(frame_idx=i, box=owl.box)
+                tracks[obj_id] = TrackState(
+                    label=owl.label, first_frame=i, score=owl.score)
+                tracks[obj_id].scores_by_frame[i] = owl.score
+                added_this_frame += 1
+
+            # (4) write detection_h for this frame, using the masks
+            # returned in step 1. Newly-seeded objects do NOT appear
+            # here; they'll be propagated from frame i+1 onwards.
+            _write_frame_output(out_dir, fid, i, tracks, prop)
+
+            if (i + 1) % 20 == 0 or i == len(frame_ids) - 1:
+                dt = time.time() - t0
+                print(f"[sam2-stream] [{i+1}/{len(frame_ids)}] fid={fid} "
+                      f"tracks={len(tracks)} (+{added_this_frame} new)  "
+                      f"{dt / (i + 1):.2f}s/frame")
+
+        # end-of-video: nothing to do; sessions close in __exit__
+
+    # Post-process: compute per-track mean_score and rewrite JSONs with it.
+    # (We could have written it in step 4 already, but collecting the full
+    # scores_by_frame first means the final mean is stable.)
+    _rewrite_with_mean_scores(out_dir, frame_ids, tracks)
+    print(f"[sam2-stream] done. tracks={len(tracks)}  "
+          f"wall time={time.time() - t0:.1f}s")
+
+
+def _write_frame_output(out_dir: str, fid: int, video_idx: int,
+                         tracks: Dict[int, TrackState],
+                         prop: PropagatedFrame) -> None:
+    dets_out: List[Dict[str, Any]] = []
+    for oid, mask in prop.object_masks.items():
+        if oid not in tracks:
+            continue
+        tr = tracks[oid]
+        bbox = prop.object_bboxes.get(oid) or _bbox_from_mask(mask)
+        sc = tr.scores_by_frame.get(video_idx, tr.score)
+        dets_out.append({
+            "object_id":  int(oid),
+            "label":      tr.label,
+            "score":      float(sc),
+            # mean_score + n_obs are filled in a second pass below;
+            # for now, stamp the current running average (prevents
+            # downstream readers from choking on missing fields).
+            "mean_score": float(np.mean(list(tr.scores_by_frame.values()))
+                                 if tr.scores_by_frame else tr.score),
+            "n_obs":      int(len(tr.scores_by_frame)),
+            "box":        list(map(int, bbox)),
+            "mask":       _mask_to_png_b64(mask),
+        })
+    out_path = os.path.join(out_dir, f"detection_{fid:06d}_final.json")
+    with open(out_path, "w") as f:
+        json.dump({"detections": dets_out}, f, indent=2)
+
+
+def _rewrite_with_mean_scores(out_dir: str, frame_ids: List[int],
+                                tracks: Dict[int, TrackState]) -> None:
+    """Second pass: fill in the final `mean_score` and `n_obs` per track
+    now that we've walked every frame. Cheap JSON rewrite (no mask
+    re-encoding -- we read/write the existing detections verbatim)."""
+    from typing import Any as _Any        # local import for type checker
+    final_mean: Dict[int, float] = {}
+    for oid, tr in tracks.items():
+        if tr.scores_by_frame:
+            final_mean[oid] = float(np.mean(list(tr.scores_by_frame.values())))
+        else:
+            final_mean[oid] = float(tr.score)
+    for fid in frame_ids:
+        p = os.path.join(out_dir, f"detection_{fid:06d}_final.json")
+        if not os.path.exists(p):
+            continue
+        with open(p, "r") as f:
+            data = json.load(f)
+        changed = False
+        for d in data.get("detections", []):
+            oid = int(d.get("object_id", -1))
+            if oid in final_mean:
+                new_mean = final_mean[oid]
+                new_n = len(tracks[oid].scores_by_frame)
+                if abs(d.get("mean_score", -1) - new_mean) > 1e-6:
+                    d["mean_score"] = new_mean
+                    changed = True
+                if d.get("n_obs", -1) != new_n:
+                    d["n_obs"] = new_n
+                    changed = True
+        if changed:
+            with open(p, "w") as f:
+                json.dump(data, f, indent=2)
+
 
 def track_dataset(dataset_root: str,
                   server_url: str = SAM2_SERVER_URL,
@@ -531,25 +792,46 @@ def main() -> int:
                     help="OWL JSONs subdir (default: detection_boxes)")
     ap.add_argument("--out-dir", default="detection_h",
                     help="output subdir (default: detection_h)")
+    ap.add_argument("--mode", choices=("streaming", "batch"),
+                    default="streaming",
+                    help="streaming = one frame at a time against the "
+                         "new /sam2_stream_* API (default); batch = the "
+                         "legacy upload-all-frames /sam2_start_session "
+                         "flow, kept for comparison.")
     ap.add_argument("--new-obj-iou", type=float, default=0.3,
                     help="IoU (bbox vs propagated mask) below which an OWL "
                          "detection spawns a NEW track (default: 0.3)")
     ap.add_argument("--max-iters", type=int, default=4,
-                    help="max propagate+add-prompt cycles (default: 4)")
+                    help="batch mode only: max propagate+add-prompt "
+                         "cycles (default: 4; streaming has no loop).")
     ap.add_argument("--min-score", type=float, default=0.0,
                     help="drop OWL dets below this score "
                          "before seeding (default: 0)")
+    ap.add_argument("--no-enforce-labels", dest="enforce_labels",
+                    action="store_false", default=True,
+                    help="streaming only: allow any-label IoU match.")
     args = ap.parse_args()
 
-    track_dataset(
-        dataset_root=args.dataset,
-        server_url=args.server,
-        det_dir_name=args.det_dir,
-        out_dir_name=args.out_dir,
-        new_obj_iou=args.new_obj_iou,
-        max_iters=args.max_iters,
-        min_score=args.min_score,
-    )
+    if args.mode == "streaming":
+        track_dataset_streaming(
+            dataset_root=args.dataset,
+            server_url=args.server,
+            det_dir_name=args.det_dir,
+            out_dir_name=args.out_dir,
+            new_obj_iou=args.new_obj_iou,
+            min_score=args.min_score,
+            enforce_label_match=args.enforce_labels,
+        )
+    else:
+        track_dataset(
+            dataset_root=args.dataset,
+            server_url=args.server,
+            det_dir_name=args.det_dir,
+            out_dir_name=args.out_dir,
+            new_obj_iou=args.new_obj_iou,
+            max_iters=args.max_iters,
+            min_score=args.min_score,
+        )
     return 0
 
 

@@ -37,11 +37,18 @@ SAM_MASK_BY_BBOX_PATH   = "/sam_mask_by_bbox"
 SAM_AUTO_MASK_PATH      = "/sam_auto_mask_generation"
 
 # SAM2 session endpoints (service/sam2/server.py).
+# Batch / offline (legacy; single /sam2_propagate over the whole video):
 SAM2_START_PATH       = "/sam2_start_session"
 SAM2_ADD_BOX_PATH     = "/sam2_add_box"
 SAM2_ADD_POINTS_PATH  = "/sam2_add_points"
 SAM2_PROPAGATE_PATH   = "/sam2_propagate"
 SAM2_CLOSE_PATH       = "/sam2_close_session"
+# Streaming / online (one frame at a time, prompts added at any frame).
+SAM2_STREAM_INIT_PATH        = "/sam2_stream_init"
+SAM2_STREAM_FRAME_PATH       = "/sam2_stream_frame"
+SAM2_STREAM_ADD_BOX_PATH     = "/sam2_stream_add_box"
+SAM2_STREAM_ADD_POINTS_PATH  = "/sam2_stream_add_points"
+SAM2_STREAM_CLOSE_PATH       = "/sam2_stream_close"
 
 # Default object vocabulary. Matches the old OBJECTS list in
 # ``rosbag2dataset/owl/owl_object_scores.py``; extend per dataset.
