@@ -223,7 +223,7 @@ def run(trajectory: str = "apple_bowl_2",
         rng_seed: int = 42,
         alpha: float = 4.4,
         enforce_labels: bool = True,
-        runtime_min_score: float = 0.01,
+        runtime_min_score: float = 0.15,
         make_video: bool = True) -> None:
     data_root = os.path.join(DATA_BASE, trajectory)
     rgb_dir = os.path.join(data_root, "rgb")
@@ -369,9 +369,11 @@ if __name__ == "__main__":
                     action="store_true", default=True)
     ap.add_argument("--no-enforce-labels", dest="enforce_labels",
                     action="store_false")
-    ap.add_argument("--runtime-min-score", type=float, default=0.01,
+    ap.add_argument("--runtime-min-score", type=float, default=0.15,
                     help="drop runtime detections with top-1 OWL score "
-                         "below this threshold")
+                         "below this threshold (production default is "
+                         "0.02 on subsequent frames, but 0.15 is a "
+                         "cleaner display threshold)")
     ap.add_argument("--no-video", action="store_true")
     args = ap.parse_args()
     run(trajectory=args.trajectory,
