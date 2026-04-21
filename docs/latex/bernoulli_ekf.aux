@@ -1,0 +1,92 @@
+\relax 
+\providecommand\hyper@newdestlabel[2]{}
+\providecommand\HyField@AuxAddToFields[1]{}
+\providecommand\HyField@AuxAddToCoFields[2]{}
+\@writefile{toc}{\contentsline {section}{\numberline {1}Problem formulation}{1}{section.1}\protected@file@percent }
+\newlabel{sec:problem}{{1}{1}{Problem formulation}{section.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.1}Setting and per-object state}{1}{subsection.1.1}\protected@file@percent }
+\newlabel{eq:obj_state}{{1}{1}{Setting and per-object state}{equation.1}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.2}Per-frame measurements}{1}{subsection.1.2}\protected@file@percent }
+\newlabel{eq:meas_raw}{{2}{1}{Per-frame measurements}{equation.2}{}}
+\citation{Williams2015}
+\citation{GarciaFernandez2018}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.3}The mask-to-pose bottleneck}{2}{subsection.1.3}\protected@file@percent }
+\newlabel{subsec:bottleneck}{{1.3}{2}{The mask-to-pose bottleneck}{subsection.1.3}{}}
+\newlabel{eq:pipeline}{{3}{2}{The mask-to-pose bottleneck}{equation.3}{}}
+\@writefile{toc}{\contentsline {subsection}{\numberline {1.4}Estimation target and pathologies}{2}{subsection.1.4}\protected@file@percent }
+\newlabel{eq:target}{{4}{2}{Estimation target and pathologies}{equation.4}{}}
+\newlabel{p:miss}{{{{(i)}}}{2}{Estimation target and pathologies}{Item.4}{}}
+\newlabel{p:clutter}{{{{(ii)}}}{2}{Estimation target and pathologies}{Item.5}{}}
+\newlabel{p:assoc}{{{{(iii)}}}{2}{Estimation target and pathologies}{Item.6}{}}
+\newlabel{p:mismatch}{{{{(iv)}}}{2}{Estimation target and pathologies}{Item.7}{}}
+\citation{MurrayLiSastry1994}
+\citation{MurrayLiSastry1994}
+\@writefile{toc}{\contentsline {section}{\numberline {2}$\mathrm  {SE}(3)$ preliminaries}{3}{section.2}\protected@file@percent }
+\newlabel{sec:se3}{{2}{3}{$\SE $ preliminaries}{section.2}{}}
+\newlabel{eq:expmap}{{5}{3}{$\SE $ preliminaries}{equation.5}{}}
+\newlabel{eq:logmap}{{6}{3}{$\SE $ preliminaries}{equation.6}{}}
+\newlabel{eq:gauss_se3}{{7}{3}{$\SE $ preliminaries}{equation.7}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {3}Extended Kalman filter on $\mathrm  {SE}(3)$ (single target)}{3}{section.3}\protected@file@percent }
+\newlabel{sec:ekf}{{3}{3}{Extended Kalman filter on $\SE $ (single target)}{section.3}{}}
+\newlabel{eq:proc}{{8}{3}{Extended Kalman filter on $\SE $ (single target)}{equation.8}{}}
+\newlabel{eq:meas}{{9}{3}{Extended Kalman filter on $\SE $ (single target)}{equation.9}{}}
+\@writefile{toc}{\contentsline {paragraph}{Predict.}{3}{section*.1}\protected@file@percent }
+\newlabel{eq:phi}{{10}{3}{Predict}{equation.10}{}}
+\newlabel{eq:ekf_T_pred}{{11}{4}{Predict}{equation.11}{}}
+\newlabel{eq:ekf_P_pred}{{12}{4}{Predict}{equation.12}{}}
+\@writefile{toc}{\contentsline {paragraph}{Update.}{4}{section*.2}\protected@file@percent }
+\newlabel{eq:ekf_innov}{{13}{4}{Update}{equation.13}{}}
+\newlabel{eq:ekf_T_upd}{{14}{4}{Update}{equation.14}{}}
+\newlabel{eq:ekf_P_upd}{{15}{4}{Update}{equation.15}{}}
+\@writefile{toc}{\contentsline {paragraph}{Innovation likelihood and Mahalanobis statistic.}{4}{section*.3}\protected@file@percent }
+\newlabel{eq:ekf_lik}{{16}{4}{Innovation likelihood and Mahalanobis statistic}{equation.16}{}}
+\newlabel{eq:mahal}{{17}{4}{Innovation likelihood and Mahalanobis statistic}{equation.17}{}}
+\@writefile{toc}{\contentsline {paragraph}{Robust update.}{4}{section*.4}\protected@file@percent }
+\newlabel{eq:huber}{{18}{4}{Robust update}{equation.18}{}}
+\citation{Williams2015}
+\citation{GarciaFernandez2018}
+\@writefile{toc}{\contentsline {section}{\numberline {4}Per-object Bernoulli state}{5}{section.4}\protected@file@percent }
+\newlabel{sec:bern}{{4}{5}{Per-object Bernoulli state}{section.4}{}}
+\newlabel{eq:bern_density}{{19}{5}{Per-object Bernoulli state}{equation.19}{}}
+\@writefile{toc}{\contentsline {paragraph}{Multi-Bernoulli approximation.}{5}{section*.5}\protected@file@percent }
+\newlabel{eq:pose_rfs_union}{{20}{5}{Multi-Bernoulli approximation}{equation.20}{}}
+\newlabel{eq:mb_factorisation}{{21}{5}{Multi-Bernoulli approximation}{equation.21}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {5}Bernoulli prediction}{5}{section.5}\protected@file@percent }
+\newlabel{sec:bern-pred}{{5}{5}{Bernoulli prediction}{section.5}{}}
+\newlabel{eq:bern_pred_r}{{22}{5}{Bernoulli prediction}{equation.22}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {6}Data association}{6}{section.6}\protected@file@percent }
+\newlabel{sec:data-assoc}{{6}{6}{Data association}{section.6}{}}
+\newlabel{eq:innov_pair}{{23}{6}{Data association}{equation.23}{}}
+\newlabel{eq:cost}{{24}{6}{Data association}{equation.24}{}}
+\newlabel{eq:hung}{{25}{6}{Data association}{equation.25}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {7}Bernoulli measurement update}{6}{section.7}\protected@file@percent }
+\newlabel{sec:update}{{7}{6}{Bernoulli measurement update}{section.7}{}}
+\@writefile{toc}{\contentsline {paragraph}{Track $i$ associated with $z_{k,l}$ ($\pi ^{\!*}(i)=l$).}{6}{section*.6}\protected@file@percent }
+\newlabel{eq:r_assoc_deriv}{{26}{6}{Track $i$ associated with $z_{k,l}$ ($\pi ^{\!*}(i)=l$)}{equation.26}{}}
+\citation{GarciaFernandez2018}
+\citation{BarShalom2011}
+\newlabel{eq:r_assoc}{{27}{7}{Track $i$ associated with $z_{k,l}$ ($\pi ^{\!*}(i)=l$)}{equation.27}{}}
+\@writefile{toc}{\contentsline {paragraph}{Track $i$ unassigned ($\pi ^{\!*}(i)=0$).}{7}{section*.7}\protected@file@percent }
+\newlabel{eq:r_miss}{{28}{7}{Track $i$ unassigned ($\pi ^{\!*}(i)=0$)}{equation.28}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {8}Birth: unmatched measurements}{7}{section.8}\protected@file@percent }
+\newlabel{sec:birth}{{8}{7}{Birth: unmatched measurements}{section.8}{}}
+\newlabel{eq:birth_r}{{29}{7}{Birth: unmatched measurements}{equation.29}{}}
+\newlabel{eq:birth_state}{{30}{7}{Birth: unmatched measurements}{equation.30}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {9}Visibility predicate $p_v$}{8}{section.9}\protected@file@percent }
+\newlabel{sec:vis}{{9}{8}{Visibility predicate $p_v$}{section.9}{}}
+\newlabel{eq:rho}{{32}{8}{Visibility predicate $p_v$}{equation.32}{}}
+\newlabel{eq:pv}{{33}{8}{Visibility predicate $p_v$}{equation.33}{}}
+\@writefile{toc}{\contentsline {section}{\numberline {10}Pruning and output}{8}{section.10}\protected@file@percent }
+\@writefile{toc}{\contentsline {section}{\numberline {11}Frame-by-frame algorithm}{8}{section.11}\protected@file@percent }
+\citation{GarciaFernandez2018}
+\@writefile{toc}{\contentsline {section}{\numberline {12}Reduction to existing code}{9}{section.12}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Calibrated parameters.}{9}{section*.8}\protected@file@percent }
+\citation{GarciaFernandez2018}
+\@writefile{toc}{\contentsline {section}{\numberline {13}Approximations relative to PMBM}{10}{section.13}\protected@file@percent }
+\newlabel{sec:approx}{{13}{10}{Approximations relative to PMBM}{section.13}{}}
+\bibcite{Williams2015}{1}
+\bibcite{GarciaFernandez2018}{2}
+\bibcite{BarShalom2011}{3}
+\bibcite{MurrayLiSastry1994}{4}
+\@writefile{toc}{\contentsline {paragraph}{What this buys, what this costs.}{11}{section*.9}\protected@file@percent }
+\gdef \@abspage@last{11}

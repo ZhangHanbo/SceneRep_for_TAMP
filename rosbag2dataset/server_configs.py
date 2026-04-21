@@ -10,23 +10,25 @@ from __future__ import annotations
 import os
 
 
-# Ports match ``arobot.configs.IP_CONFIGS`` (OWLViT → 4051, SAM → 4057).
-# Host override: currently deployed on crane5 instead of crane6 — flip
-# SERVER_HOST or the per-service URLs to move again without touching code.
+# Ports match ``arobot.configs.IP_CONFIGS``:
+#   OWLViT -> 4051
+#   SAM2   -> 4057 (single server hosting both /sam2_* and legacy /sam_*;
+#                   the old standalone SAM v1 service at 4057 is retired
+#                   and SAM2 squats the same port).
+# Host override: currently deployed on crane5 — flip SERVER_HOST or the
+# per-service URLs to move without touching code.
 SERVER_HOST = os.environ.get("SCENEREP_SERVER_HOST",
                              "crane5.ddns.comp.nus.edu.sg")
 
 OWL_SERVER_URL = os.environ.get(
     "OWL_SERVER_URL", f"http://{SERVER_HOST}:4051")
-# SAM2 server. Hosts both the new /sam2_* video tracking endpoints
-# AND the legacy /sam_* per-image endpoints (drop-in replacement for the
-# old SAM v1 service that lived at ``{CRANE6}:4057``).
+# SAM2 server. Hosts both the new /sam2_* video tracking endpoints AND
+# the legacy /sam_* per-image endpoints on the same port (4057), matching
+# ``arobot.configs.IP_CONFIGS['SAM2']``.
 SAM2_SERVER_URL = os.environ.get(
-    "SAM2_SERVER_URL", f"http://{SERVER_HOST}:4055")
-# SAM (legacy per-image API). Default points at the SAM2 server now —
-# SAM2 implements the /sam_* endpoints with the exact legacy wire format.
-# Override to keep talking to the old ``{CRANE6}:4057`` service if you
-# haven't decommissioned it yet.
+    "SAM2_SERVER_URL", f"http://{SERVER_HOST}:4057")
+# SAM (legacy per-image API). Defaults to the SAM2 server which now
+# implements the /sam_* endpoints with the exact legacy wire format.
 SAM_SERVER_URL = os.environ.get("SAM_SERVER_URL", SAM2_SERVER_URL)
 
 # Endpoint paths on each server (from service/owl_vit/server.py and

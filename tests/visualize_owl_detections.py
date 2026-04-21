@@ -28,8 +28,15 @@ import numpy as np
 SCENEREP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if SCENEREP_ROOT not in sys.path:
     sys.path.insert(0, SCENEREP_ROOT)
+# ``tests/`` has no ``__init__.py``, so ``tests.visualize_sam2_observations``
+# isn't importable without extra plumbing. Add the tests/ dir itself.
+_TESTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _TESTS_DIR not in sys.path:
+    sys.path.insert(0, _TESTS_DIR)
 
-from tests.visualize_sam2_observations import _palette_color, _pngs_to_mp4
+from visualize_sam2_observations import (
+    _palette_color, _pngs_to_mp4, _resolve_data_root,
+)  # noqa: E402
 
 DATA_BASE = os.path.join(
     os.path.dirname(SCENEREP_ROOT),
@@ -108,7 +115,7 @@ def render_histogram(label_totals: Dict[str, int],
 
 
 def run(trajectory: str, step: int = 3, make_video: bool = True) -> None:
-    data_root = os.path.join(DATA_BASE, trajectory)
+    data_root = _resolve_data_root(trajectory)
     rgb_dir = os.path.join(data_root, "rgb")
     perception_det = os.path.join(
         SCENEREP_ROOT, "tests", "visualization_pipeline", trajectory,

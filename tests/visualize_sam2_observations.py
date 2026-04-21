@@ -49,10 +49,27 @@ import numpy as np
 from PIL import Image
 
 SCENEREP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+# Primary data root: the sibling Mobile_Manipulation_on_Fetch tree.
 DATA_BASE = os.path.join(
     os.path.dirname(SCENEREP_ROOT),
     "Mobile_Manipulation_on_Fetch", "multi_objects"
 )
+# Secondary: the repo's own datasets/ dir (pre-extracted rosbag traj).
+DATA_BASE_FALLBACK = os.path.join(SCENEREP_ROOT, "datasets")
+
+
+def _resolve_data_root(trajectory: str) -> str:
+    """Return ``<base>/<trajectory>`` for the first base where the
+    trajectory actually exists on disk, so viz can target both the
+    Mobile_Manipulation_on_Fetch dataset and the SceneRep datasets/
+    rosbag trajectories without extra flags."""
+    for base in (DATA_BASE, DATA_BASE_FALLBACK):
+        cand = os.path.join(base, trajectory)
+        if os.path.isdir(os.path.join(cand, "rgb")):
+            return cand
+    # Fall through to the primary base so the caller's error message
+    # continues to point somewhere sane.
+    return os.path.join(DATA_BASE, trajectory)
 
 
 # 20-color palette keyed by `object_id % 20`. Distinguishable on top of
@@ -261,7 +278,7 @@ def run(trajectory: str = "apple_bowl_2",
         step: int = 3,
         min_mean_score: float = 0.1,
         make_video: bool = True) -> None:
-    data_root = os.path.join(DATA_BASE, trajectory)
+    data_root = _resolve_data_root(trajectory)
     rgb_dir = os.path.join(data_root, "rgb")
     # Prefer tests/visualization_pipeline/<trajectory>/perception/detection_h/
     # (where run_pipeline.sh now writes); fall back to the legacy

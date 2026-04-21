@@ -20,7 +20,7 @@
 # Environment variables (all optional):
 #   SSH_USER           ssh user on the detection host  (default: hanbo)
 #   SSH_HOST           detection host                  (default: crane5.ddns.comp.nus.edu.sg)
-#   OWL_PORT SAM2_PORT remote+local ports              (defaults: 4051 4055)
+#   OWL_PORT SAM2_PORT remote+local ports              (defaults: 4051 4057)
 #                      The SAM2 server at SAM2_PORT also serves the legacy
 #                      /sam_* endpoints, so no separate SAM_PORT is needed.
 #                      Override SAM_PORT to keep tunneling the old SAM
@@ -45,7 +45,7 @@ OWL_PORT="${OWL_PORT:-4051}"
 # SAM2 hosts both /sam2_* and /sam_* endpoints. Set SAM_PORT to a non-empty
 # value (e.g. SAM_PORT=4057) only if you also want to tunnel the legacy
 # SAM v1 service running on a different host.
-SAM2_PORT="${SAM2_PORT:-4055}"
+SAM2_PORT="${SAM2_PORT:-4057}"
 SAM_PORT="${SAM_PORT:-}"
 DATASET_PATH="${DATASET_PATH:-$REPO_ROOT/datasets}"
 PYTHON="${PYTHON:-python}"

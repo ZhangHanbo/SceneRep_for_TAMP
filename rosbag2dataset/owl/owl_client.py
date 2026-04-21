@@ -120,16 +120,17 @@ def call_owl(rgb: np.ndarray,
 def _filter_by_size(bboxes_norm: np.ndarray,
                     img_w: int, img_h: int,
                     max_area_frac: float = 0.75,
-                    min_side_px: int = 5,
-                    min_area_px: int = 100) -> np.ndarray:
+                    min_area_frac: float = 1.0 / 500,
+                    min_side_frac: float = 1.0 / 50) -> np.ndarray:
     """Return a boolean mask of bboxes that survive size filtering.
 
     Drops three kinds of degenerate boxes:
       * covering more than ``max_area_frac`` of the image -- almost
         always OWL hallucinations covering the whole scene,
-      * with any side shorter than ``min_side_px`` pixels -- slivers,
-      * with total area below ``min_area_px`` pixels -- sub-threshold
-        edge artifacts.
+      * with area below ``min_area_frac`` of the image area -- sub-
+        threshold edge artifacts,
+      * with min side below ``min_side_frac`` of the image's shorter
+        side -- slivers.
     """
     if bboxes_norm.size == 0:
         return np.ones(0, dtype=bool)
@@ -138,10 +139,12 @@ def _filter_by_size(bboxes_norm: np.ndarray,
     areas_norm = box_w_norm * box_h_norm
     pix_w = img_w * box_w_norm
     pix_h = img_h * box_h_norm
+    min_side_px_thr = min_side_frac * min(img_w, img_h)
+    min_area_px_thr = min_area_frac * (img_w * img_h)
     pix_area = pix_w * pix_h
     keep = (areas_norm < max_area_frac) \
-         & (pix_w >= min_side_px) & (pix_h >= min_side_px) \
-         & (pix_area >= min_area_px)
+         & (pix_w >= min_side_px_thr) & (pix_h >= min_side_px_thr) \
+         & (pix_area >= min_area_px_thr)
     return keep
 
 
@@ -157,7 +160,8 @@ def process_frame(rgb_path: str,
                   thresh: float = OWL_BBOX_CONF,
                   nms_cross: float = OWL_NMS_CROSS,
                   nms_cat: float = OWL_NMS_CAT,
-                  with_nms: bool = True) -> int:
+                  with_nms: bool = True,
+                  min_score: float = 0.1) -> int:
     img_bgr = cv2.imread(rgb_path)
     if img_bgr is None:
         print(f"[warn] cannot read {rgb_path}")
@@ -172,6 +176,18 @@ def process_frame(rgb_path: str,
         nms_cat_threshold=nms_cat,
         server_url=server_url, with_nms=with_nms,
     )
+
+    # Score floor: server's bbox_conf_threshold already drops below
+    # that, but we additionally prune detections at or below
+    # ``min_score`` (default 0.1) because low-score OWL boxes are
+    # mostly noise and shouldn't reach the SAM2 client / viz.
+    if len(box_names) > 0 and min_score > 0.0:
+        keep = scores > min_score
+        if not keep.all():
+            idx = np.where(keep)[0]
+            bboxes_norm = bboxes_norm[keep]
+            scores = scores[keep]
+            box_names = [box_names[int(i)] for i in idx]
 
     # Size filter: drop > 75 % of image, slivers under 5 px, areas below
     # 100 px^2. Kept because OWL sometimes produces full-frame boxes and
@@ -249,6 +265,10 @@ def main() -> int:
                     help=f"per-class NMS IoU (default {OWL_NMS_CAT})")
     ap.add_argument("--no-nms", action="store_true",
                     help="disable server-side NMS entirely")
+    ap.add_argument("--min-score", type=float, default=0.1,
+                    help="drop detections with score <= this value "
+                         "before size filtering (default: 0.1; "
+                         "low-score OWL boxes are mostly noise).")
     args = ap.parse_args()
 
     if os.path.isabs(args.dataset_name) and os.path.isdir(args.dataset_name):
@@ -316,6 +336,7 @@ def main() -> int:
                 nms_cross=args.nms_cross,
                 nms_cat=args.nms_cat,
                 with_nms=not args.no_nms,
+                min_score=args.min_score,
             )
             total_detections += n
         except requests.RequestException as e:

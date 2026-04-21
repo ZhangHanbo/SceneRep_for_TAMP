@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 import rospy
-from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Pose
+from geometry_msgs.msg import PoseWithCovarianceStamped, PoseStamped, Pose, PoseArray
 from sensor_msgs.msg import JointState, CompressedImage, Image, LaserScan
 from message_filters import Subscriber, Cache
 from tf2_msgs.msg import TFMessage
@@ -22,7 +22,17 @@ import sys
 import threading
 
 
-DATASET_PATH = "/media/zhy/bcd58cff-609f-4e23-89f6-9fc2e8b36fea/datasets"
+# Where extracted datasets get written. Override with env var DATASET_PATH
+# or CLI flag --out. Default path kept for the original Linux workstation.
+DATASET_PATH = os.environ.get(
+    "DATASET_PATH",
+    "/media/zhy/bcd58cff-609f-4e23-89f6-9fc2e8b36fea/datasets",
+)
+# Where raw .bag files live. Override with env var ROSBAG_DIR or CLI flag.
+ROSBAG_DIR = os.environ.get(
+    "ROSBAG_DIR",
+    "/media/zhy/bcd58cff-609f-4e23-89f6-9fc2e8b36fea/rosbags",
+)
 SAVE_FREQUENCY = 5  # 保存频率 (Hz)
 
 class PoseProcessor:
@@ -43,6 +53,7 @@ class PoseProcessor:
         self.latest_tf_r_camera = None
         self.joint_transforms = {}
         self.latest_timestamp = None  # 存储最近一次处理的时间戳
+        self.latest_particles = None  # nav localization particle cloud
 
         # 初始化消息订阅
         self.js_sub = rospy.Subscriber("/joint_states", JointState, self.js_callback)
@@ -50,7 +61,16 @@ class PoseProcessor:
         self.rgb_sub = rospy.Subscriber("/head_camera/rgb/image_raw/compressed", CompressedImage, self.rgb_callback)
         self.depth_sub = rospy.Subscriber("/head_camera/depth_registered/image_raw", Image, self.depth_callback)
         self.bs_sub = rospy.Subscriber("/base_scan", LaserScan, self.bs_callback)
+        # Refined AMCL pose. These bags don't always carry /amcl_icp_pose
+        # (which is produced live by icp_amcl.py). Fall back to /amcl_pose
+        # (raw AMCL) if the refined one is absent.
         self.pu_sub = rospy.Subscriber("/amcl_icp_pose", PoseStamped, self.pu_callback)
+        self.pu_fallback_sub = rospy.Subscriber(
+            "/amcl_pose", PoseWithCovarianceStamped, self.pu_fallback_callback)
+        # Particle cloud for localization uncertainty. AMCL publishes
+        # geometry_msgs/PoseArray on /particlecloud (ROS1 default).
+        self.particles_sub = rospy.Subscriber(
+            "/particlecloud", PoseArray, self.particles_callback)
 
         # 初始化发布者
         self.ee_camera_pub = rospy.Publisher("/ee_camera", PoseStamped, queue_size=10)
@@ -66,7 +86,7 @@ class PoseProcessor:
         self.save_idx = 0
         self.bridge = CvBridge()
         self.root_dir = f"{DATASET_PATH}/{os.path.splitext(rosbag_name)[0]}"
-        subdirs = ["rgb", "depth", "pose_txt"]
+        subdirs = ["rgb", "depth", "pose_txt", "particles"]
         os.makedirs(self.root_dir, exist_ok=True)
         
         for subdir in subdirs:
@@ -223,6 +243,30 @@ class PoseProcessor:
     def pu_callback(self, msg):
         """位姿更新回调"""
         self.latest_pu = msg
+        self.last_message_time = rospy.Time.now()
+
+    def pu_fallback_callback(self, msg: PoseWithCovarianceStamped):
+        """Fallback AMCL pose (raw, covariance-aware).
+
+        Used only when /amcl_icp_pose hasn't been seen yet; the refined
+        source wins as soon as it arrives.
+        """
+        if self.latest_pu is not None:
+            return
+        ps = PoseStamped()
+        ps.header = msg.header
+        ps.pose = msg.pose.pose
+        self.latest_pu = ps
+        self.last_message_time = rospy.Time.now()
+
+    def particles_callback(self, msg: PoseArray):
+        """AMCL particle cloud, saved per frame as (N, 4) float32: x, y, yaw, weight.
+
+        AMCL's /particlecloud (PoseArray) does not include weights; each
+        particle is treated as uniformly weighted. If you later switch to
+        nav2_msgs/ParticleCloud (which carries weights), extend this.
+        """
+        self.latest_particles = msg
         self.last_message_time = rospy.Time.now()
 
     def update_tf_transforms(self):
@@ -425,6 +469,38 @@ class PoseProcessor:
                     # ==== 保存时间戳 ====
                     with open(self.timestamp_path, "a") as f:
                         f.write(f"{self.save_idx} {t.secs} {t.nsecs}\n")
+
+                    # ==== 保存 particle cloud（本地化不确定性） ====
+                    #
+                    # One .npy per frame, shape (N, 4): [x, y, yaw, weight].
+                    # Uniform weights (1/N) — AMCL's PoseArray strips the
+                    # per-particle weight. Consumers (RBPF orchestrator) can
+                    # optionally re-weight from their own observation model.
+                    try:
+                        if self.latest_particles is not None:
+                            poses = self.latest_particles.poses
+                            if poses:
+                                xs, ys, yaws = [], [], []
+                                for p in poses:
+                                    xs.append(p.position.x)
+                                    ys.append(p.position.y)
+                                    q = p.orientation
+                                    yaw = tft.euler_from_quaternion(
+                                        [q.x, q.y, q.z, q.w])[2]
+                                    yaws.append(yaw)
+                                n = len(poses)
+                                arr = np.stack([
+                                    np.asarray(xs,  dtype=np.float32),
+                                    np.asarray(ys,  dtype=np.float32),
+                                    np.asarray(yaws, dtype=np.float32),
+                                    np.full(n, 1.0 / n, dtype=np.float32),
+                                ], axis=1)
+                                particles_path = os.path.join(
+                                    self.root_dir, "particles",
+                                    f"particles_{self.save_idx:06d}.npy")
+                                np.save(particles_path, arr)
+                    except Exception as e:
+                        rospy.logerr(f"保存粒子云失败: {e}")
                         
                 except Exception as e:
                     rospy.logerr(f"保存位姿或时间戳失败: {e}")
@@ -447,8 +523,18 @@ class PoseProcessor:
 
 def main():
     # 获取 rosbag 文件路径
-    rosbag_name = sys.argv[1]
-    rosbag_path = f"/media/zhy/bcd58cff-609f-4e23-89f6-9fc2e8b36fea/rosbags/{rosbag_name}"
+    # Positional: bag name (with or without .bag) OR a full path.
+    rosbag_arg = sys.argv[1]
+    if os.path.isabs(rosbag_arg) and os.path.isfile(rosbag_arg):
+        rosbag_path = rosbag_arg
+        rosbag_name = os.path.basename(rosbag_arg)
+    else:
+        rosbag_name = rosbag_arg
+        rosbag_path = os.path.join(ROSBAG_DIR, rosbag_name)
+    if not os.path.isfile(rosbag_path):
+        raise FileNotFoundError(
+            f"bag not found: {rosbag_path} "
+            f"(set ROSBAG_DIR or pass an absolute path)")
 
     # 启动 rosbag play
     rosbag_process = subprocess.Popen(

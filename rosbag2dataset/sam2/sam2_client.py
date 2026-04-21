@@ -40,14 +40,16 @@ import glob
 import io
 import json
 import os
+import pickle
 import sys
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import requests
 from PIL import Image
+from scipy.optimize import linear_sum_assignment
 
 # Allow running as `python rosbag2dataset/sam2/sam2_client.py`
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -63,6 +65,9 @@ from rosbag2dataset.server_configs import (  # noqa: E402
     # streaming / online
     SAM2_STREAM_INIT_PATH, SAM2_STREAM_FRAME_PATH,
     SAM2_STREAM_ADD_BOX_PATH, SAM2_STREAM_CLOSE_PATH,
+    # stateless image-model endpoint used to compute "instant" masks
+    # for each OWL bbox (for mask-vs-mask IoU in the matching cost).
+    SAM_MASK_BY_BBOX_PATH,
 )
 
 
@@ -99,6 +104,54 @@ def _mask_to_png_b64(mask: np.ndarray) -> str:
     return base64.b64encode(buf.getvalue()).decode("utf-8")
 
 
+def _owl_bbox_masks(rgb: np.ndarray,
+                     boxes: List[List[int]],
+                     server_url: str = SAM2_SERVER_URL,
+                     timeout: float = 60.0
+                     ) -> List[Optional[np.ndarray]]:
+    """Stateless call to ``/sam_mask_by_bbox``: one image + N bboxes
+    -> N boolean masks at the input image resolution. Uses the image
+    (not video) model, so this does NOT modify the streaming session
+    state of our tracker.
+
+    Returns a list of the same length as ``boxes``. Entries are
+    numpy bool arrays of shape ``(H, W)`` or ``None`` for slots the
+    server didn't return. The caller's failure handling should
+    treat ``None`` as "no instant mask available" and fall back to
+    the bbox-vs-mask IoU.
+
+    The server wire format is the legacy SAM v1 one:
+    ``{"result": [{"segmentation": base64(pickle(ndarray))}, ...]}``.
+    """
+    if not boxes:
+        return []
+    # Server expects a 3-D list: (n_prompts, 1, 4).
+    wrapped = [[list(map(int, b))] for b in boxes]
+    url = server_url.rstrip("/") + SAM_MASK_BY_BBOX_PATH
+    payload = {
+        "image":       _encode_png(rgb),
+        "bboxes":      wrapped,
+        "return_best": True,
+    }
+    r = requests.post(url, json=payload, timeout=timeout)
+    r.raise_for_status()
+    data = r.json()
+    out: List[Optional[np.ndarray]] = []
+    for item in data.get("result", []):
+        try:
+            raw = base64.b64decode(item["segmentation"])
+            m = pickle.loads(raw)
+            m = np.asarray(m).squeeze()
+            if m.ndim == 3:
+                m = m[0]
+            out.append(m.astype(bool))
+        except Exception:
+            out.append(None)
+    while len(out) < len(boxes):
+        out.append(None)
+    return out
+
+
 def _bbox_from_mask(mask: np.ndarray) -> List[int]:
     ys, xs = np.where(mask)
     if xs.size == 0:
@@ -128,6 +181,26 @@ def _bbox_mask_iou(box_xyxy: List[int],
     return inter / union if union > 0 else 0.0
 
 
+def _mask_mask_iou(a: Optional[np.ndarray],
+                    b: Optional[np.ndarray]) -> float:
+    """Binary mask-vs-mask IoU. Returns 0 on shape mismatch or when
+    either mask is empty / None -- callers can detect "no info" by
+    pairing this with an explicit None check upstream."""
+    if a is None or b is None:
+        return 0.0
+    if a.shape != b.shape:
+        return 0.0
+    a_sum = int(a.sum())
+    b_sum = int(b.sum())
+    if a_sum == 0 or b_sum == 0:
+        return 0.0
+    inter = int(np.logical_and(a, b).sum())
+    if inter == 0:
+        return 0.0
+    union = a_sum + b_sum - inter
+    return inter / union if union > 0 else 0.0
+
+
 def _bbox_iou(a: List[int], b: List[int]) -> float:
     ax1, ay1, ax2, ay2 = [int(v) for v in a]
     bx1, by1, bx2, by2 = [int(v) for v in b]
@@ -139,6 +212,71 @@ def _bbox_iou(a: List[int], b: List[int]) -> float:
     b_area = max(0, bx2 - bx1) * max(0, by2 - by1)
     union = a_area + b_area - inter
     return inter / union if union > 0 else 0.0
+
+
+def _bbox_intersection_area(a: List[int], b: List[int]) -> int:
+    ax1, ay1, ax2, ay2 = [int(v) for v in a]
+    bx1, by1, bx2, by2 = [int(v) for v in b]
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw = max(0, ix2 - ix1); ih = max(0, iy2 - iy1)
+    return iw * ih
+
+
+def _bbox_area(b: List[int]) -> int:
+    x1, y1, x2, y2 = [int(v) for v in b]
+    return max(0, x2 - x1) * max(0, y2 - y1)
+
+
+# ---------------------------------------------------------------------------
+# Debug dump helpers (shared between the matcher and the visualiser)
+# ---------------------------------------------------------------------------
+
+def _dump_tracks_for_debug(prop: "PropagatedFrame",
+                            tracks: Dict[int, "TrackState"],
+                            include_dormant: bool = False,
+                            track_last_valid: Optional[Dict[int, Tuple[int, List[int]]]] = None,
+                            current_i: int = 0,
+                            dormant_window: int = 30) -> List[Dict[str, Any]]:
+    """Snapshot the current track population for one frame's debug
+    JSON. ``prop`` supplies masks for active tracks; ``track_last_valid``
+    + ``current_i`` + ``dormant_window`` bring in dormant tracks (recent
+    last-valid bbox, no mask). Masks are PNG-base64 for portability."""
+    out: List[Dict[str, Any]] = []
+    for oid, mask in prop.object_masks.items():
+        if oid not in tracks:
+            continue
+        if mask is None or int(mask.sum()) == 0:
+            continue
+        tr = tracks[oid]
+        out.append({
+            "oid": int(oid),
+            "label": tr.label,
+            "box": list(map(int, _bbox_from_mask(mask))),
+            "mask_b64": _mask_to_png_b64(mask),
+            "is_dormant": False,
+        })
+    if include_dormant and track_last_valid is not None:
+        for oid in tracks:
+            if oid in prop.object_masks:
+                mm = prop.object_masks[oid]
+                if mm is not None and int(mm.sum()) > 0:
+                    continue
+            lv = track_last_valid.get(oid)
+            if lv is None:
+                continue
+            last_i, last_bbox = lv
+            if current_i - last_i > dormant_window:
+                continue
+            out.append({
+                "oid": int(oid),
+                "label": tracks[oid].label,
+                "box": list(map(int, last_bbox)),
+                "mask_b64": None,
+                "is_dormant": True,
+                "last_valid_client_idx": int(last_i),
+            })
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -251,13 +389,109 @@ def _load_frames(rgb_dir: str) -> Tuple[List[int], List[np.ndarray]]:
 # Tracker
 # ---------------------------------------------------------------------------
 
-@dataclass
 class TrackState:
-    """Client-side metadata parallel to SAM2's internal per-object state."""
-    label: str
-    first_frame: int
-    score: float
-    scores_by_frame: Dict[int, float] = field(default_factory=dict)
+    """Client-side metadata parallel to SAM2's internal per-object state.
+
+    A single SAM2 track can collect observations from multiple OWL
+    labels over time -- e.g. an apple originally seeded as ``apple``
+    is later detected as ``cup`` at some frames because OWL is
+    confused. We keep per-label score histories and expose ``label``/
+    ``score``/``scores_by_frame`` as derived views of the label with
+    the highest mean score, so call sites that read those fields get
+    the best current classification automatically.
+
+    Each track also maintains a float-valued EMA mask
+    (``float_mask``, shape (H, W), float32). Every frame's SAM2
+    binary mask gets blended in via
+    ``float_mask = alpha*new_binary + (1-alpha)*float_mask``, so the
+    exported mask smooths over SAM2's per-frame jitter. Consumers
+    binarise the exported mask at ``>= 0.5``.
+    """
+
+    def __init__(self, label: str, first_frame: int, score: float) -> None:
+        self.first_frame = first_frame
+        self.seed_label = label
+        self.seed_score = float(score)
+        # label -> {frame_idx: owl_score}.
+        self.label_scores: Dict[str, Dict[int, float]] = {label: {}}
+        # Exponentially-averaged float mask; None until first observed.
+        self.float_mask: Optional[np.ndarray] = None
+
+    def observe(self, label: str, frame_idx: int, score: float) -> None:
+        """Record a new OWL observation for this track, under ``label``."""
+        self.label_scores.setdefault(label, {})[int(frame_idx)] = float(score)
+
+    def update_mask(self, new_binary_mask: np.ndarray,
+                     alpha: float = 0.5) -> None:
+        """EMA-update the float mask with a new SAM2 observation.
+
+        First valid observation initialises ``float_mask`` as a float
+        copy of the binary mask. Subsequent updates blend pixel-wise:
+        ``float_mask = alpha*new + (1-alpha)*float_mask``. Shape
+        mismatches (shouldn't happen within one session) re-initialise.
+        """
+        if new_binary_mask is None:
+            return
+        new_float = new_binary_mask.astype(np.float32)
+        if self.float_mask is None or self.float_mask.shape != new_float.shape:
+            self.float_mask = new_float
+            return
+        self.float_mask = (alpha * new_float
+                            + (1.0 - alpha) * self.float_mask)
+
+    def binary_mask(self, threshold: float = 0.5) -> Optional[np.ndarray]:
+        """Return the EMA mask thresholded at ``threshold`` (default
+        0.5), or None if the track has no observations yet."""
+        if self.float_mask is None:
+            return None
+        return self.float_mask >= threshold
+
+    def best_label_mean(self) -> Tuple[str, float]:
+        """Return ``(label, mean_score)`` for the label with the highest
+        mean OWL score across all frames it was observed on. Falls back
+        to the seed label + seed score when no observations exist."""
+        best_lbl = self.seed_label
+        best_mean = -1.0
+        for lbl, sbf in self.label_scores.items():
+            if not sbf:
+                continue
+            mean = sum(sbf.values()) / len(sbf)
+            if mean > best_mean:
+                best_mean = mean
+                best_lbl = lbl
+        if best_mean < 0:
+            return self.seed_label, self.seed_score
+        return best_lbl, best_mean
+
+    def score_at_frame(self, frame_idx: int) -> Optional[float]:
+        """Return the OWL score recorded for ``frame_idx`` under any
+        label (max if multiple labels fired on the same frame)."""
+        fi = int(frame_idx)
+        found: List[float] = []
+        for sbf in self.label_scores.values():
+            if fi in sbf:
+                found.append(sbf[fi])
+        return max(found) if found else None
+
+    def total_observations(self) -> int:
+        """Number of (label, frame) observations across every label."""
+        return sum(len(sbf) for sbf in self.label_scores.values())
+
+    # --- back-compat views used by the rest of the driver / writers. ---
+
+    @property
+    def label(self) -> str:
+        return self.best_label_mean()[0]
+
+    @property
+    def score(self) -> float:
+        return self.best_label_mean()[1]
+
+    @property
+    def scores_by_frame(self) -> Dict[int, float]:
+        """Score-by-frame for the currently-best label. Read-only as a
+        shim -- write with ``observe(label, frame, score)`` instead."""
+        return self.label_scores.get(self.best_label_mean()[0], {})
 
 
 @dataclass
@@ -441,24 +675,84 @@ def track_dataset_streaming(dataset_root: str,
                              server_url: str = SAM2_SERVER_URL,
                              det_dir_name: str = "detection_boxes",
                              out_dir_name: str = "detection_h",
-                             new_obj_iou: float = 0.3,
                              min_score: float = 0.0,
-                             enforce_label_match: bool = True) -> None:
+                             hungarian_max_cost: float = 0.7,
+                             hungarian_label_penalty: float = 0.2,
+                             hungarian_score_weight: float = 0.15,
+                             new_seed_min_score: float = 0.25,
+                             owl_mask_timeout: float = 60.0,
+                             reset_every: int = 150,
+                             reset_buffer_max: int = 100,
+                             reset_buffer_interval: int = 3,
+                             debug_dir: Optional[str] = None,
+                             debug_fid_start: int = 0,
+                             debug_fid_end: int = 10 ** 9) -> None:
     """Streaming SAM2 tracker.
 
-    Per-frame loop:
-      1. /sam2_stream_frame  --> propagated masks for all existing tracks
-      2. Match OWL detections at this frame to propagated masks via
-         (same-label AND bbox-vs-mask IoU >= new_obj_iou).
-         Matched: record the OWL score on the track (for mean_score).
-         Unmatched: seed a new track via /sam2_stream_add_box at this
-         frame. The new track starts being propagated from next frame.
-      3. Write detection_h/detection_{fid:06d}_final.json with the
-         masks returned in step 1.
+    Three server-side SAM2 quirks the driver works around:
 
-    No iteration loop, no MAX_NEW_PER_ITER cap, no cluster dedupe:
-    every new OWL detection at every frame gets a chance to become a
-    track, and SAM2's memory bank enforces temporal consistency.
+    * ``/sam2_stream_frame`` called before any prompt is registered
+      returns ``objects=[]`` without advancing the server's
+      ``s.frame_count`` — it only records ``original_size`` so the
+      caller can add prompts and resend the frame.
+    * The HF Transformers Sam2VideoModel rejects successive
+      ``add_inputs_to_inference_session`` calls that share the same
+      ``frame_idx`` without a ``video_model(frame=...)`` call in
+      between. The second-and-later calls put the session into a
+      corrupted state ("maskmem_features in conditioning outputs
+      cannot be empty when not is_initial_conditioning_frame"). We
+      therefore treat each prompt as a separate SAM2 frame: each
+      unmatched OWL detection is added at ``frame_idx =
+      sam2_frame_count`` and immediately committed by a
+      ``/sam2_stream_frame`` call on the SAME RGB image, which
+      advances ``sam2_frame_count`` and registers that prompt in
+      SAM2's memory bank without showing the model a new image.
+    * The session's GPU memory grows unboundedly with
+      ``sam2_frame_count × n_objects`` -- every processed frame
+      caches features and every ``add_box`` creates a conditioning
+      frame that never gets evicted. On long or track-dense
+      trajectories the server 500s with a CUDA OOM. We mitigate by
+      resetting the session every ``reset_every`` SAM2 frames:
+      close, reopen, then REPLAY a rolling buffer of recent frames
+      (``reset_buffer_max`` entries sampled every
+      ``reset_buffer_interval`` client frames) so SAM2 rebuilds a
+      multi-frame memory bank per track. For each live track we
+      condition it at the EARLIEST and LATEST buffered frames where
+      it had a valid mask (two anchors per track), then let SAM2
+      propagate through the remaining buffered frames. Tracks that
+      have no current valid mask at reset time or no bbox_history
+      are dropped -- losing them here beats polluting the fresh
+      session with stale bboxes that cascade into track-explosion.
+
+    Per dataset frame (clean 4-step flow):
+      1. Load OWL detections at this frame.
+      2. SAM2 propagate current tracks into this frame.
+      3. Hungarian-match OWL dets to tracks. Cost per pair is
+         ``(1 - IoU) + label_penalty + score_weight * (1 - score)``
+         where IoU is bbox-vs-mask for active tracks (current prop
+         mask) and bbox-vs-bbox for dormant tracks (last-valid
+         bbox, within DORMANT_MATCH_WINDOW). ``label_penalty`` is
+         0 when the OWL label already appears in the track's
+         label_scores history, ``hungarian_label_penalty`` otherwise
+         -- a soft mismatch cost, not a veto. The score term
+         penalises low-confidence detections so they have lower
+         matching priority. Pairs with cost > ``hungarian_max_cost``
+         are rejected. Matched pairs observe the OWL label on the
+         track (label_scores bucket).
+      4. Merge unmatched dets: each det Hungarian didn't accept
+         re-checks every track with the same cost formula (single
+         direction, greedy). If the best cost is <= max, absorb
+         into that track (multiple dets can merge into one track).
+         Otherwise, if the det's OWL score >= new_seed_min_score,
+         seed a new track via seed_one; else drop it.
+
+    There is no post-propagation NMS merge between tracks.
+    Cross-track mask overlaps are handled entirely through the
+    Hungarian/fallback layer above.
+
+    Side concern: if sam2_frame_count >= reset_every we close+reopen
+    the SAM2 session and reseed live tracks -- purely a GPU-memory
+    bound, orthogonal to the matching pipeline.
     """
     rgb_dir = os.path.join(dataset_root, "rgb")
     det_dir = (det_dir_name if os.path.isabs(det_dir_name)
@@ -466,6 +760,10 @@ def track_dataset_streaming(dataset_root: str,
     out_dir = (out_dir_name if os.path.isabs(out_dir_name)
                else os.path.join(dataset_root, out_dir_name))
     os.makedirs(out_dir, exist_ok=True)
+    if debug_dir:
+        os.makedirs(debug_dir, exist_ok=True)
+        print(f"[sam2-stream] debug dumps -> {debug_dir}  "
+              f"fid range=[{debug_fid_start}, {debug_fid_end}]")
 
     print(f"[sam2-stream] dataset={dataset_root}  server={server_url}")
     frame_ids, frames = _load_frames(rgb_dir)
@@ -477,56 +775,502 @@ def track_dataset_streaming(dataset_root: str,
           f"owl-dets-per-frame (mean)={mean_ow:.1f}")
 
     tracks: Dict[int, TrackState] = {}
+    # Mirror of the server's ``s.frame_count``. Every call to
+    # ``/sam2_stream_frame`` that actually runs the model increments
+    # both sides by 1; the peek-when-empty call does not. ``add_box``
+    # must target this index, not the client loop index ``i`` — they
+    # diverge for short-circuited frames (no OWL dets and no tracks
+    # yet) and for the per-prompt commit forwards below.
+    sam2_frame_count = 0
+    empty_prop = PropagatedFrame(object_masks={}, object_bboxes={})
     t0 = time.time()
+
+    def seed_one(owl: OwlDet, rgb_arr: np.ndarray,
+                 client_idx: int) -> PropagatedFrame:
+        """Add a single OWL detection as a new track and commit it by
+        running one SAM2 forward on the same RGB image.
+
+        SAM2 rejects multiple ``add_inputs_to_inference_session`` calls
+        at the same ``frame_idx`` without an intervening forward, so we
+        give each prompt its own ``frame_idx = sam2_frame_count`` and
+        immediately call ``/sam2_stream_frame`` to advance the counter.
+        Passing the same RGB on every commit keeps the image content
+        frozen while SAM2 reconciles its memory bank — the returned
+        masks are always for this frame and always include every
+        already-seeded track plus the newly-added one.
+
+        The new track's ``float_mask`` is initialised from the
+        committed mask so the exported (EMA-binarised) mask is
+        immediately populated for this frame's output.
+        """
+        nonlocal sam2_frame_count
+        obj_id = sam2.add_box(frame_idx=sam2_frame_count, box=owl.box)
+        tracks[obj_id] = TrackState(
+            label=owl.label, first_frame=client_idx, score=owl.score)
+        tracks[obj_id].observe(owl.label, client_idx, owl.score)
+        committed = sam2.frame(rgb_arr)
+        sam2_frame_count += 1
+        new_mask = committed.object_masks.get(obj_id)
+        if new_mask is not None:
+            tracks[obj_id].update_mask(new_mask, alpha=0.5)
+        return committed
 
     with SAM2StreamClient(server_url=server_url) as sam2:
         sam2.start()
 
+        last_prop = empty_prop
+        reset_count = 0
+
+        # Rolling history for warm-restart + dormant-track matching.
+        # frame_buffer stores numpy refs into ``frames`` (no copies).
+        # bbox_history remembers each track's bbox at every BUFFERED
+        # frame (used by reset_session's replay). track_last_valid
+        # remembers EACH track's most-recent valid-mask bbox + the
+        # client frame it was observed on -- used for the dormant
+        # match that prevents cascading new-seed when SAM2
+        # temporarily loses a track's mask.
+        frame_buffer: List[Tuple[int, np.ndarray]] = []
+        bbox_history: Dict[int, Dict[int, List[int]]] = {}
+        track_last_valid: Dict[int, Tuple[int, List[int]]] = {}
+        # Match against dormant (no-mask-right-now) tracks only if
+        # their last-valid observation is within this many client
+        # frames -- beyond that they're stale, drop them when reset
+        # runs or let OWL seed a fresh track.
+        DORMANT_MATCH_WINDOW = 30
+
+        def _note_buffer(i: int, rgb: np.ndarray,
+                         prop: PropagatedFrame) -> None:
+            """Append this frame to the rolling buffer (at the
+            sampled cadence) and snapshot every live track's bbox
+            at this moment. Called AFTER per-frame processing so
+            ``prop`` reflects matches + new seeds."""
+            if reset_buffer_interval <= 0 or reset_buffer_max <= 0:
+                return
+            if i % reset_buffer_interval != 0:
+                return
+            frame_buffer.append((i, rgb))
+            for oid, mask in prop.object_masks.items():
+                if oid not in tracks:
+                    continue
+                if mask is None or int(mask.sum()) == 0:
+                    continue
+                bbox_history.setdefault(oid, {})[i] = _bbox_from_mask(mask)
+            while len(frame_buffer) > reset_buffer_max:
+                evicted_i, _ = frame_buffer.pop(0)
+                for d in bbox_history.values():
+                    d.pop(evicted_i, None)
+
+        def reset_session(rgb_now: np.ndarray,
+                          current_client_i: int) -> PropagatedFrame:
+            """Close the current SAM2 session, start a fresh one, and
+            re-seed every live track from the bbox of its current mask.
+
+            Tracks with no valid mask in ``last_prop`` at reset time
+            are dropped -- SAM2 wasn't tracking them anymore. Client
+            side oid/label/score history survives the reset verbatim.
+            sam2_frame_count is rebased to 0 on both sides.
+
+            Note: the rolling frame_buffer + bbox_history are kept
+            up-to-date elsewhere for potential use by downstream
+            logic (e.g. dormant-track matching) -- they're not used
+            by the reset itself here.
+            """
+            nonlocal sam2_frame_count, reset_count
+            # Snapshot live tracks whose EMA mask is non-empty at
+            # threshold 0.5. Using the smoothed mask (instead of
+            # SAM2's raw prop) makes the reseed bbox more stable
+            # across brief occlusions. Tracks absent from last_prop
+            # AND with empty float_mask are gone.
+            live: List[Tuple[int, List[int]]] = []
+            for oid in list(tracks.keys()):
+                tr = tracks[oid]
+                bin_mask = tr.binary_mask(0.5)
+                if bin_mask is None or int(bin_mask.sum()) == 0:
+                    tracks.pop(oid, None)
+                    continue
+                live.append((oid, _bbox_from_mask(bin_mask)))
+
+            sam2.close()
+            sam2.start()
+            sam2_frame_count = 0
+            reset_count += 1
+
+            # Peek current frame so the server records original_size
+            # (does not advance frame_count).
+            sam2.frame(rgb_now)
+            new_prop = empty_prop
+            for oid, box in live:
+                # Preserve the client-side oid. If the server mints a
+                # different one, remap the tracks[] key to match.
+                committed_oid = sam2.add_box(
+                    frame_idx=sam2_frame_count, box=box, object_id=oid)
+                if committed_oid != oid and committed_oid not in tracks:
+                    tracks[committed_oid] = tracks.pop(oid)
+                new_prop = sam2.frame(rgb_now)
+                sam2_frame_count += 1
+            retained = sum(1 for o in new_prop.object_masks
+                           if o in tracks and new_prop.object_masks[o] is not None
+                           and int(new_prop.object_masks[o].sum()) > 0)
+            print(f"[sam2-stream] RESET #{reset_count}  "
+                  f"reseeded={len(live)}  retained={retained}")
+            return new_prop
+
         for i, fid in enumerate(frame_ids):
             rgb = frames[i]
-
-            # (1) propagate existing tracks into this frame
-            prop = sam2.frame(rgb)
-
-            # (2) OWL <-> propagated-mask matching (label + IoU gate)
             owls = owl_dets.get(fid, [])
-            matched_det_idx: set = set()
-            for j, owl in enumerate(owls):
-                best_iou = 0.0
-                best_oid: Optional[int] = None
-                for oid, mask in prop.object_masks.items():
-                    t_label = tracks[oid].label if oid in tracks else None
-                    if enforce_label_match and t_label != owl.label:
-                        continue
-                    iou = _bbox_mask_iou(owl.box, mask)
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_oid = oid
-                if best_iou >= new_obj_iou and best_oid is not None:
-                    # record observed OWL score on the matched track
-                    tracks[best_oid].scores_by_frame[i] = owl.score
-                    matched_det_idx.add(j)
-
-            # (3) seed new tracks for unmatched OWL detections
             added_this_frame = 0
-            for j, owl in enumerate(owls):
-                if j in matched_det_idx:
-                    continue
-                obj_id = sam2.add_box(frame_idx=i, box=owl.box)
-                tracks[obj_id] = TrackState(
-                    label=owl.label, first_frame=i, score=owl.score)
-                tracks[obj_id].scores_by_frame[i] = owl.score
-                added_this_frame += 1
 
-            # (4) write detection_h for this frame, using the masks
-            # returned in step 1. Newly-seeded objects do NOT appear
-            # here; they'll be propagated from frame i+1 onwards.
-            _write_frame_output(out_dir, fid, i, tracks, prop)
+            # Debug capture: only active inside the "propagate" branch
+            # below (seeding-only frames have no matching to dump).
+            debug_enabled = (
+                debug_dir is not None
+                and debug_fid_start <= fid <= debug_fid_end)
+            debug_record: Optional[Dict[str, Any]] = None
+
+            # Short-circuit: nothing seeded yet and no OWL dets to seed
+            # with -> no reason to hit the server (it would just record
+            # original_size and return empty). Write an empty output so
+            # the downstream JSON schema stays complete.
+            if not tracks and not owls:
+                _write_frame_output(out_dir, fid, i, tracks, empty_prop)
+                last_prop = empty_prop
+            else:
+                if not tracks:
+                    # First frame with OWL detections. Peek once to
+                    # register original_size on the server, then seed
+                    # each OWL det with its own add_box + commit
+                    # forward. After the last commit, ``prop`` holds
+                    # masks for every seeded track on THIS rgb.
+                    sam2.frame(rgb)
+                    prop = empty_prop
+                    for owl in owls:
+                        prop = seed_one(owl, rgb, i)
+                        added_this_frame += 1
+                else:
+                    # Debug: snapshot OWL detections + prior-frame
+                    # track state before this frame's propagation.
+                    # OWL-bbox-mask PNGs are filled in after the
+                    # /sam_mask_by_bbox call below.
+                    if debug_enabled:
+                        debug_record = {
+                            "fid": int(fid),
+                            "client_idx": int(i),
+                            "frame_shape": [int(rgb.shape[0]),
+                                             int(rgb.shape[1])],
+                            "owl_dets": [{
+                                "box": list(map(int, o.box)),
+                                "label": o.label,
+                                "score": float(o.score),
+                                "mask_b64": None,
+                            } for o in owls],
+                            "prev_tracks": _dump_tracks_for_debug(
+                                last_prop, tracks, include_dormant=True,
+                                track_last_valid=track_last_valid,
+                                current_i=i,
+                                dormant_window=DORMANT_MATCH_WINDOW),
+                        }
+
+                    # (2) SAM2 propagation: get this frame's masks
+                    # for every currently-seeded track.
+                    prop = sam2.frame(rgb)
+                    sam2_frame_count += 1
+
+                    # EMA-update each track's float mask from
+                    # SAM2's new binary mask. Pure per-track state
+                    # maintenance -- no cross-track decisions here;
+                    # the exported mask is the smoothed float mask
+                    # thresholded at 0.5.
+                    for _oid, _mask in prop.object_masks.items():
+                        if _oid in tracks and _mask is not None:
+                            tracks[_oid].update_mask(_mask, alpha=0.5)
+
+                    # "Instant" masks for each OWL bbox via the
+                    # stateless /sam_mask_by_bbox endpoint. Used
+                    # below so the Hungarian cost is mask-vs-mask
+                    # (for active tracks) instead of bbox-vs-mask.
+                    # Returns one bool ndarray per OWL det or None
+                    # if the server couldn't segment that box; the
+                    # cost function falls back to bbox-vs-mask IoU
+                    # for any ``None`` slot.
+                    owl_masks: List[Optional[np.ndarray]] = []
+                    if owls:
+                        try:
+                            owl_masks = _owl_bbox_masks(
+                                rgb, [o.box for o in owls],
+                                server_url=server_url,
+                                timeout=owl_mask_timeout)
+                        except Exception as e:
+                            print(f"[sam2-stream] /sam_mask_by_bbox "
+                                  f"failed at fid={fid}: {e}")
+                            owl_masks = [None] * len(owls)
+
+                    if debug_record is not None:
+                        for _k, _m in enumerate(owl_masks):
+                            if _m is not None and bool(_m.any()):
+                                debug_record["owl_dets"][_k]["mask_b64"] = (
+                                    _mask_to_png_b64(_m))
+
+                    # (3) Hungarian-match OWL dets to tracks.
+                    #
+                    # Cost model (per pair):
+                    #   cost = (1 - IoU) + label_pen + score_pen
+                    #   label_pen  = 0 if owl.label in
+                    #                  track.label_scores, else
+                    #                  hungarian_label_penalty
+                    #   score_pen  = hungarian_score_weight *
+                    #                  (1 - owl.score)
+                    # IoU is bbox-vs-mask for active tracks and
+                    # bbox-vs-bbox for dormant tracks (last-valid
+                    # bbox within DORMANT_MATCH_WINDOW).
+                    # hungarian_label_penalty is a soft cost, not a
+                    # veto. hungarian_score_weight deprioritises
+                    # low-confidence detections during matching.
+                    # Pairs with cost > hungarian_max_cost are
+                    # rejected.
+                    #
+                    # Two passes:
+                    #   3a) Hungarian (one-to-one optimal).
+                    #   3b) Single-direction greedy fallback for
+                    #       dets Hungarian didn't accept: each
+                    #       such det re-checks every track and is
+                    #       absorbed into the closest one if cost
+                    #       <= max. Lets one physical object with
+                    #       duplicate OWL detections merge into one
+                    #       track rather than spawning spurious new
+                    #       tracks.
+                    #
+                    # Absorption = observe(label, fid, score). The
+                    # track's float_mask keeps getting EMA-updated
+                    # from SAM2's prop.object_masks every frame.
+                    track_entries: List[Tuple[int, np.ndarray, List[int]]] = []
+                    # (oid, ref_mask_or_None, ref_bbox_or_None)
+                    for _oid, _mask in prop.object_masks.items():
+                        if _oid not in tracks:
+                            continue
+                        if _mask is None or int(_mask.sum()) == 0:
+                            continue
+                        track_entries.append((_oid, _mask, None))
+                    for _oid in tracks:
+                        _mm = prop.object_masks.get(_oid)
+                        if _mm is not None and int(_mm.sum()) > 0:
+                            continue  # already covered as active
+                        lv = track_last_valid.get(_oid)
+                        if lv is None:
+                            continue
+                        last_i, last_bbox = lv
+                        if i - last_i > DORMANT_MATCH_WINDOW:
+                            continue
+                        track_entries.append((_oid, None, last_bbox))
+
+                    def _pair_cost(owl_idx: int,
+                                    owl: OwlDet,
+                                    entry: Tuple[int, Optional[np.ndarray],
+                                                 Optional[List[int]]]) -> float:
+                        oid, mref, bref = entry
+                        det_mask = (owl_masks[owl_idx]
+                                     if owl_idx < len(owl_masks)
+                                     else None)
+                        if mref is not None:
+                            # Active track: prefer mask-vs-mask IoU
+                            # between the instant OWL mask and the
+                            # tracked SAM2 mask; fall back to
+                            # bbox-vs-mask if the OWL mask wasn't
+                            # available.
+                            if (det_mask is not None
+                                    and det_mask.shape == mref.shape
+                                    and int(det_mask.sum()) > 0):
+                                iou = _mask_mask_iou(det_mask, mref)
+                            else:
+                                iou = _bbox_mask_iou(owl.box, mref)
+                        elif bref is not None:
+                            # Dormant track: no current mask, only
+                            # last-valid bbox -- use bbox-vs-bbox IoU.
+                            iou = _bbox_iou(owl.box, bref)
+                        else:
+                            return float("inf")
+                        if iou <= 0.0:
+                            return float("inf")
+                        label_pen = (
+                            0.0 if owl.label in tracks[oid].label_scores
+                            else hungarian_label_penalty)
+                        score_pen = (hungarian_score_weight
+                                      * (1.0 - float(owl.score)))
+                        return (1.0 - iou) + label_pen + score_pen
+
+                    matched_det_idx: set = set()
+                    N_d = len(owls)
+                    M_t = len(track_entries)
+                    debug_hungarian: List[Dict[str, Any]] = []
+                    debug_fallback: List[Dict[str, Any]] = []
+                    debug_new_seeds: List[Dict[str, Any]] = []
+                    cost_mx: Optional[np.ndarray] = None
+                    if N_d > 0 and M_t > 0:
+                        BIG = 1e6
+                        cost_mx = np.full((N_d, M_t), BIG, dtype=np.float64)
+                        for c_j, entry in enumerate(track_entries):
+                            for r_i, owl in enumerate(owls):
+                                c = _pair_cost(r_i, owl, entry)
+                                if np.isfinite(c):
+                                    cost_mx[r_i, c_j] = c
+                        row_ind, col_ind = linear_sum_assignment(cost_mx)
+                        for r_i, c_j in zip(row_ind, col_ind):
+                            c_val = float(cost_mx[r_i, c_j])
+                            accepted = c_val <= hungarian_max_cost
+                            if debug_record is not None:
+                                debug_hungarian.append({
+                                    "det_idx": int(r_i),
+                                    "track_idx": int(c_j),
+                                    "oid": int(track_entries[c_j][0]),
+                                    "cost": c_val,
+                                    "accepted": bool(accepted),
+                                })
+                            if not accepted:
+                                continue
+                            oid = track_entries[c_j][0]
+                            tracks[oid].observe(
+                                owls[r_i].label, i, owls[r_i].score)
+                            matched_det_idx.add(int(r_i))
+
+                    # (4) single-direction greedy fallback + seed new
+                    # tracks for dets with no plausible existing
+                    # match. The "merge unmatched" step: multiple
+                    # unmatched dets can merge into the SAME track
+                    # when they're all close to it. New tracks are
+                    # ONLY seeded for dets whose OWL score is above
+                    # ``new_seed_min_score`` -- low-confidence
+                    # detections that don't find a close track are
+                    # dropped rather than polluting the tracker
+                    # with a fresh spurious track.
+                    for j, owl in enumerate(owls):
+                        if j in matched_det_idx:
+                            continue
+                        best_c = hungarian_max_cost + 1.0
+                        best_oid: Optional[int] = None
+                        for entry in track_entries:
+                            c = _pair_cost(j, owl, entry)
+                            if c < best_c:
+                                best_c = c
+                                best_oid = entry[0]
+                        if (best_oid is not None
+                                and best_c <= hungarian_max_cost):
+                            tracks[best_oid].observe(
+                                owl.label, i, owl.score)
+                            if debug_record is not None:
+                                debug_fallback.append({
+                                    "det_idx": int(j),
+                                    "oid": int(best_oid),
+                                    "cost": float(best_c),
+                                })
+                            continue
+                        if owl.score < new_seed_min_score:
+                            if debug_record is not None:
+                                debug_new_seeds.append({
+                                    "det_idx": int(j),
+                                    "oid": -1,
+                                    "dropped_low_score": True,
+                                    "score": float(owl.score),
+                                    "best_reject_cost":
+                                        float(best_c) if best_oid is not None
+                                        else None,
+                                    "best_reject_oid":
+                                        int(best_oid) if best_oid is not None
+                                        else None,
+                                })
+                            continue
+                        # New seed: diff tracks[] keys to identify the
+                        # oid the server minted for this detection.
+                        before_oids = set(tracks.keys())
+                        prop = seed_one(owl, rgb, i)
+                        new_oids = sorted(set(tracks.keys()) - before_oids)
+                        added_this_frame += 1
+                        # Extend track_entries so LATER dets in this
+                        # frame's fallback loop can match against
+                        # the freshly-seeded track (prevents same-
+                        # frame duplicate seeding when OWL gives
+                        # multiple close boxes for one object).
+                        for _new_oid in new_oids:
+                            _new_mask = prop.object_masks.get(_new_oid)
+                            if (_new_mask is not None
+                                    and int(_new_mask.sum()) > 0):
+                                track_entries.append(
+                                    (_new_oid, _new_mask, None))
+                        if debug_record is not None:
+                            debug_new_seeds.append({
+                                "det_idx": int(j),
+                                "oid": int(new_oids[0])
+                                        if new_oids else -1,
+                                "dropped_low_score": False,
+                                "score": float(owl.score),
+                                "best_reject_cost":
+                                    float(best_c) if best_oid is not None
+                                    else None,
+                                "best_reject_oid":
+                                    int(best_oid) if best_oid is not None
+                                    else None,
+                            })
+
+                    # Debug: finalise this frame's debug record with
+                    # matching internals + the final track state.
+                    if debug_record is not None:
+                        matching_dbg: Dict[str, Any] = {
+                            "max_cost": float(hungarian_max_cost),
+                            "label_penalty": float(hungarian_label_penalty),
+                            "score_weight": float(hungarian_score_weight),
+                            "new_seed_min_score":
+                                float(new_seed_min_score),
+                            "track_entries": [{
+                                "oid": int(e[0]),
+                                "kind": ("active" if e[1] is not None
+                                         else "dormant"),
+                            } for e in track_entries],
+                        }
+                        if cost_mx is not None:
+                            matching_dbg["cost_matrix"] = cost_mx.tolist()
+                        matching_dbg["hungarian"] = debug_hungarian
+                        matching_dbg["fallback"] = debug_fallback
+                        matching_dbg["new_seeds"] = debug_new_seeds
+                        debug_record["matching"] = matching_dbg
+                        debug_record["final_tracks"] = (
+                            _dump_tracks_for_debug(prop, tracks))
+
+                _write_frame_output(out_dir, fid, i, tracks, prop)
+                last_prop = prop
+
+                # Debug: dump record for the propagate branch (only).
+                if debug_record is not None:
+                    dp = os.path.join(debug_dir,
+                                       f"debug_{fid:06d}.json")
+                    with open(dp, "w") as f:
+                        json.dump(debug_record, f)
+
+            # Update the rolling history buffer + per-track bbox
+            # snapshots. track_last_valid is updated every frame so
+            # the dormant-track matcher has fresh data; bbox_history
+            # is updated only at sampled buffer frames.
+            for oid, mask in last_prop.object_masks.items():
+                if oid not in tracks:
+                    continue
+                if mask is None or int(mask.sum()) == 0:
+                    continue
+                track_last_valid[oid] = (i, _bbox_from_mask(mask))
+            _note_buffer(i, rgb, last_prop)
+
+            # (4) periodic session reset. Keep the server's per-session
+            # memory bounded: sam2_frame_count x n_tracks drives GPU
+            # allocation, and SAM2 never evicts conditioning frames
+            # once they're added via add_box. Close + reopen +
+            # buffer-replay keeps the tracker going with a clean
+            # memory bank while preserving ~100 frames of context.
+            if reset_every > 0 and sam2_frame_count >= reset_every \
+                    and tracks:
+                last_prop = reset_session(rgb, i)
 
             if (i + 1) % 20 == 0 or i == len(frame_ids) - 1:
                 dt = time.time() - t0
                 print(f"[sam2-stream] [{i+1}/{len(frame_ids)}] fid={fid} "
                       f"tracks={len(tracks)} (+{added_this_frame} new)  "
+                      f"sam2_count={sam2_frame_count}  "
+                      f"resets={reset_count}  "
                       f"{dt / (i + 1):.2f}s/frame")
 
         # end-of-video: nothing to do; sessions close in __exit__
@@ -542,25 +1286,59 @@ def track_dataset_streaming(dataset_root: str,
 def _write_frame_output(out_dir: str, fid: int, video_idx: int,
                          tracks: Dict[int, TrackState],
                          prop: PropagatedFrame) -> None:
+    """Write one frame's ``detection_{fid}_final.json``.
+
+    The exported mask is the track's EMA-binarised mask
+    (``TrackState.binary_mask(0.5)``), NOT SAM2's raw per-frame
+    binary output. The raw prop determines WHICH tracks are written
+    this frame (only tracks SAM2 is currently propagating), but the
+    actual mask + bbox come from the smoothed float mask. An empty
+    float-mask binary skips the track for this frame.
+    """
     dets_out: List[Dict[str, Any]] = []
     for oid, mask in prop.object_masks.items():
         if oid not in tracks:
             continue
         tr = tracks[oid]
-        bbox = prop.object_bboxes.get(oid) or _bbox_from_mask(mask)
-        sc = tr.scores_by_frame.get(video_idx, tr.score)
+        bin_mask = tr.binary_mask(0.5)
+        # Fall back to SAM2's raw mask if the EMA hasn't built up
+        # yet (shouldn't happen since seed_one / main-loop update
+        # populate float_mask, but keeps the writer robust).
+        if bin_mask is None or not bool(bin_mask.any()):
+            bin_mask = mask
+        # Skip tracks that are effectively invisible this frame:
+        # both the EMA mask and the raw SAM2 mask are empty. These
+        # are kept alive in tracks[] so dormant matching can
+        # re-associate them if OWL re-detects later, but they have
+        # no mask to export.
+        if bin_mask is None or not bool(bin_mask.any()):
+            continue
+        bbox = _bbox_from_mask(bin_mask)
+        best_label, best_mean = tr.best_label_mean()
+        # score at this frame: the OWL score seen on THIS frame under
+        # any label (fall back to seed score if no observation landed).
+        observed = tr.score_at_frame(video_idx)
+        sc = observed if observed is not None else tr.seed_score
+        # Per-label summary (all labels the track has accumulated so
+        # far). Updated again at the end of the video by
+        # ``_rewrite_with_mean_scores``.
+        label_stats = {
+            lbl: {
+                "mean_score": float(
+                    sum(sbf.values()) / len(sbf)) if sbf else float(tr.seed_score),
+                "n_obs": int(len(sbf)),
+            }
+            for lbl, sbf in tr.label_scores.items()
+        }
         dets_out.append({
             "object_id":  int(oid),
-            "label":      tr.label,
+            "label":      best_label,
             "score":      float(sc),
-            # mean_score + n_obs are filled in a second pass below;
-            # for now, stamp the current running average (prevents
-            # downstream readers from choking on missing fields).
-            "mean_score": float(np.mean(list(tr.scores_by_frame.values()))
-                                 if tr.scores_by_frame else tr.score),
-            "n_obs":      int(len(tr.scores_by_frame)),
+            "mean_score": float(best_mean),
+            "n_obs":      int(tr.total_observations()),
+            "labels":     label_stats,
             "box":        list(map(int, bbox)),
-            "mask":       _mask_to_png_b64(mask),
+            "mask":       _mask_to_png_b64(bin_mask),
         })
     out_path = os.path.join(out_dir, f"detection_{fid:06d}_final.json")
     with open(out_path, "w") as f:
@@ -569,16 +1347,27 @@ def _write_frame_output(out_dir: str, fid: int, video_idx: int,
 
 def _rewrite_with_mean_scores(out_dir: str, frame_ids: List[int],
                                 tracks: Dict[int, TrackState]) -> None:
-    """Second pass: fill in the final `mean_score` and `n_obs` per track
-    now that we've walked every frame. Cheap JSON rewrite (no mask
-    re-encoding -- we read/write the existing detections verbatim)."""
-    from typing import Any as _Any        # local import for type checker
-    final_mean: Dict[int, float] = {}
+    """Second pass: fill in the final ``label`` / ``mean_score`` /
+    ``n_obs`` / ``labels`` per track now that we've walked every
+    frame. The winning label can shift as later frames accumulate
+    observations, so we rewrite it here too. Cheap JSON rewrite (no
+    mask re-encoding -- read/write the detections verbatim)."""
+    final: Dict[int, Dict[str, Any]] = {}
     for oid, tr in tracks.items():
-        if tr.scores_by_frame:
-            final_mean[oid] = float(np.mean(list(tr.scores_by_frame.values())))
-        else:
-            final_mean[oid] = float(tr.score)
+        best_label, best_mean = tr.best_label_mean()
+        final[oid] = {
+            "label":      best_label,
+            "mean_score": float(best_mean),
+            "n_obs":      int(tr.total_observations()),
+            "labels":     {
+                lbl: {
+                    "mean_score": float(
+                        sum(sbf.values()) / len(sbf)) if sbf else float(tr.seed_score),
+                    "n_obs": int(len(sbf)),
+                }
+                for lbl, sbf in tr.label_scores.items()
+            },
+        }
     for fid in frame_ids:
         p = os.path.join(out_dir, f"detection_{fid:06d}_final.json")
         if not os.path.exists(p):
@@ -588,15 +1377,21 @@ def _rewrite_with_mean_scores(out_dir: str, frame_ids: List[int],
         changed = False
         for d in data.get("detections", []):
             oid = int(d.get("object_id", -1))
-            if oid in final_mean:
-                new_mean = final_mean[oid]
-                new_n = len(tracks[oid].scores_by_frame)
-                if abs(d.get("mean_score", -1) - new_mean) > 1e-6:
-                    d["mean_score"] = new_mean
-                    changed = True
-                if d.get("n_obs", -1) != new_n:
-                    d["n_obs"] = new_n
-                    changed = True
+            if oid not in final:
+                continue
+            ref = final[oid]
+            if d.get("label") != ref["label"]:
+                d["label"] = ref["label"]
+                changed = True
+            if abs(d.get("mean_score", -1) - ref["mean_score"]) > 1e-6:
+                d["mean_score"] = ref["mean_score"]
+                changed = True
+            if d.get("n_obs", -1) != ref["n_obs"]:
+                d["n_obs"] = ref["n_obs"]
+                changed = True
+            if d.get("labels") != ref["labels"]:
+                d["labels"] = ref["labels"]
+                changed = True
         if changed:
             with open(p, "w") as f:
                 json.dump(data, f, indent=2)
@@ -640,7 +1435,7 @@ def track_dataset(dataset_root: str,
         obj_id = next_id; next_id += 1
         tracks[obj_id] = TrackState(
             label=owl.label, first_frame=video_idx, score=owl.score)
-        tracks[obj_id].scores_by_frame[video_idx] = owl.score
+        tracks[obj_id].observe(owl.label, video_idx, owl.score)
         sam2.add_box(video_idx, obj_id, owl.box)
         return obj_id
 
@@ -693,7 +1488,7 @@ def track_dataset(dataset_root: str,
                         new_prompts.append((i, owl))
                     elif best_oid is not None:
                         # Record observed score on the matched track.
-                        tracks[best_oid].scores_by_frame[i] = owl.score
+                        tracks[best_oid].observe(owl.label, i, owl.score)
 
             if not new_prompts:
                 print(f"[sam2-client] converged after {it+1} iteration(s)")
@@ -734,29 +1529,39 @@ def track_dataset(dataset_root: str,
     #  high mean. Downstream consumers can filter on this belief to drop
     #  hallucinations (e.g. viz panels keep mean_score > 0.1).
     # -----------------------------------------------------------------
-    track_mean_score: Dict[int, float] = {}
+    final_summary: Dict[int, Tuple[str, float, int, Dict[str, Dict[str, Any]]]] = {}
     for oid, tr in tracks.items():
-        if tr.scores_by_frame:
-            track_mean_score[oid] = float(
-                np.mean(list(tr.scores_by_frame.values())))
-        else:
-            track_mean_score[oid] = float(tr.score)
+        best_label, best_mean = tr.best_label_mean()
+        labels_out = {
+            lbl: {
+                "mean_score": float(
+                    sum(sbf.values()) / len(sbf)) if sbf else float(tr.seed_score),
+                "n_obs": int(len(sbf)),
+            }
+            for lbl, sbf in tr.label_scores.items()
+        }
+        final_summary[oid] = (best_label, float(best_mean),
+                              int(tr.total_observations()), labels_out)
 
     print(f"[sam2-client] writing {len(frame_ids)} JSONs → {out_dir}")
     for i, prop in enumerate(prop_by_idx):
         fid = idx_to_fid.get(i, i)
         dets_out = []
         for oid, mask in prop.object_masks.items():
+            if oid not in tracks:
+                continue
+            tr = tracks[oid]
             bbox = prop.object_bboxes.get(oid) or _bbox_from_mask(mask)
-            # Use the OWL-observed score at this frame when available,
-            # fall back to the seeding score.
-            sc = tracks[oid].scores_by_frame.get(i, tracks[oid].score)
+            observed = tr.score_at_frame(i)
+            sc = observed if observed is not None else tr.seed_score
+            best_label, best_mean, n_obs, labels_out = final_summary[oid]
             dets_out.append({
                 "object_id":  int(oid),
-                "label":      tracks[oid].label,
+                "label":      best_label,
                 "score":      float(sc),
-                "mean_score": float(track_mean_score[oid]),
-                "n_obs":      int(len(tracks[oid].scores_by_frame)),
+                "mean_score": float(best_mean),
+                "n_obs":      int(n_obs),
+                "labels":     labels_out,
                 "box":        list(map(int, bbox)),
                 "mask":       _mask_to_png_b64(mask),
             })
@@ -799,17 +1604,96 @@ def main() -> int:
                          "legacy upload-all-frames /sam2_start_session "
                          "flow, kept for comparison.")
     ap.add_argument("--new-obj-iou", type=float, default=0.3,
-                    help="IoU (bbox vs propagated mask) below which an OWL "
-                         "detection spawns a NEW track (default: 0.3)")
+                    help="batch mode only: IoU (bbox vs propagated "
+                         "mask) below which an OWL detection spawns "
+                         "a NEW track (default: 0.3). Streaming mode "
+                         "uses Hungarian matching instead -- see "
+                         "--hungarian-max-cost.")
     ap.add_argument("--max-iters", type=int, default=4,
                     help="batch mode only: max propagate+add-prompt "
                          "cycles (default: 4; streaming has no loop).")
     ap.add_argument("--min-score", type=float, default=0.0,
                     help="drop OWL dets below this score "
                          "before seeding (default: 0)")
-    ap.add_argument("--no-enforce-labels", dest="enforce_labels",
-                    action="store_false", default=True,
-                    help="streaming only: allow any-label IoU match.")
+    ap.add_argument("--hungarian-max-cost", type=float, default=0.7,
+                    help="streaming only: Hungarian matching rejects "
+                         "OWL<->track pairs whose cost "
+                         "(1 - IoU) + label_penalty exceeds this "
+                         "value. Soft equivalent of an IoU floor: "
+                         "0.7 allows same-label matches down to IoU "
+                         "0.3, and cross-label matches (with a 0.2 "
+                         "label penalty) down to IoU 0.5. The same "
+                         "threshold gates the single-direction "
+                         "fallback that absorbs duplicate OWL dets "
+                         "into an existing track (default: 0.7).")
+    ap.add_argument("--hungarian-label-penalty", type=float,
+                    default=0.2,
+                    help="streaming only: additive cost when the OWL "
+                         "detection's label is NOT yet in the "
+                         "track's label_scores history. 0 disables "
+                         "the label term entirely (pure IoU "
+                         "matching); higher values make cross-label "
+                         "matching harder (default: 0.2, i.e. the "
+                         "mismatched label needs ~0.2 more IoU "
+                         "headroom than a matching label to win).")
+    ap.add_argument("--hungarian-score-weight", type=float,
+                    default=0.15,
+                    help="streaming only: weight of the confidence "
+                         "penalty in the Hungarian cost. Each pair's "
+                         "cost gets an extra term "
+                         "weight * (1 - owl.score), so lower-"
+                         "confidence OWL detections are matched to "
+                         "existing tracks with lower priority. "
+                         "0 disables the score term (default: 0.15; "
+                         "smaller than the label penalty so it "
+                         "affects priority ordering without vetoing "
+                         "legitimate drifted matches).")
+    ap.add_argument("--new-seed-min-score", type=float, default=0.25,
+                    help="streaming only: hard minimum on OWL score "
+                         "for seeding a NEW track. Dets below this "
+                         "score may still match existing tracks "
+                         "(via Hungarian or the fallback absorb "
+                         "pass) but are dropped if unmatched -- "
+                         "prevents low-confidence hallucinations "
+                         "from creating fresh tracks (default: 0.25).")
+    ap.add_argument("--owl-mask-timeout", type=float, default=60.0,
+                    help="streaming only: HTTP timeout (seconds) "
+                         "for the per-frame /sam_mask_by_bbox call "
+                         "used to produce an 'instant' mask per "
+                         "OWL bbox, which is then matched "
+                         "mask-vs-mask against each active track "
+                         "(default: 60).")
+    ap.add_argument("--reset-every", type=int, default=150,
+                    help="streaming only: close+reopen the SAM2 "
+                         "session every N sam2_frame_count steps and "
+                         "re-seed live tracks from the bbox of their "
+                         "current mask. Caps server GPU memory; at "
+                         "0 disables. Reset cost ~1 close + 1 init + "
+                         "n_tracks * (add_box + commit) roundtrips "
+                         "(default: 150).")
+    ap.add_argument("--reset-buffer-max", type=int, default=100,
+                    help="streaming only: max number of recent "
+                         "frames kept in the rolling buffer for "
+                         "warm-restart during reset (default: 100).")
+    ap.add_argument("--reset-buffer-interval", type=int, default=3,
+                    help="streaming only: sample a frame into the "
+                         "rolling buffer every N client frames "
+                         "(default: 3; so 100 buffered frames cover "
+                         "~300 client frames of history).")
+    ap.add_argument("--debug-dir", default=None,
+                    help="streaming only: if set, write one JSON per "
+                         "propagate-branch frame with OWL dets, "
+                         "prior-frame track state, cost matrix, "
+                         "Hungarian/fallback decisions, new seeds, "
+                         "and final tracks. Consumed by "
+                         "tests/visualize_matching_debug.py.")
+    ap.add_argument("--debug-fid-start", type=int, default=0,
+                    help="streaming only: lower inclusive bound on "
+                         "frame_id for debug dump (default: 0).")
+    ap.add_argument("--debug-fid-end", type=int, default=10 ** 9,
+                    help="streaming only: upper inclusive bound on "
+                         "frame_id for debug dump (default: effectively "
+                         "unlimited).")
     args = ap.parse_args()
 
     if args.mode == "streaming":
@@ -818,9 +1702,18 @@ def main() -> int:
             server_url=args.server,
             det_dir_name=args.det_dir,
             out_dir_name=args.out_dir,
-            new_obj_iou=args.new_obj_iou,
             min_score=args.min_score,
-            enforce_label_match=args.enforce_labels,
+            hungarian_max_cost=args.hungarian_max_cost,
+            hungarian_label_penalty=args.hungarian_label_penalty,
+            hungarian_score_weight=args.hungarian_score_weight,
+            new_seed_min_score=args.new_seed_min_score,
+            owl_mask_timeout=args.owl_mask_timeout,
+            reset_every=args.reset_every,
+            reset_buffer_max=args.reset_buffer_max,
+            reset_buffer_interval=args.reset_buffer_interval,
+            debug_dir=args.debug_dir,
+            debug_fid_start=args.debug_fid_start,
+            debug_fid_end=args.debug_fid_end,
         )
     else:
         track_dataset(
