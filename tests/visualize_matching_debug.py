@@ -243,6 +243,19 @@ def _panel_matching(ax, owl_dets: List[Dict[str, Any]],
                 lines.append(f"  det[{s['det_idx']}] -> "
                              f"#{s['oid']} (NEW){extra}")
 
+    self_merges = matching.get("self_merges", []) or []
+    self_tau = matching.get("self_match_max_cost")
+    if self_tau is not None:
+        lines.append(f"Self-match merges (tau={float(self_tau):.2f}):")
+    else:
+        lines.append("Self-match merges:")
+    if not self_merges:
+        lines.append("  (none)")
+    else:
+        for sm in self_merges:
+            lines.append(f"  #{sm['keep_oid']} <- #{sm['drop_oid']} "
+                         f"c={sm['cost']:.2f}")
+
     ax.text(0.01, 0.01, "\n".join(lines),
             family="monospace", fontsize=7, va="top", ha="left")
 
@@ -263,12 +276,18 @@ def _render_one(debug_json: Dict[str, Any], rgb: np.ndarray,
                               gridspec_kw={"hspace": 0.12,
                                            "wspace": 0.08})
     _panel_owl(axes[0, 0], rgb, debug_json.get("owl_dets", []))
-    _panel_tracks(axes[0, 1], rgb, debug_json.get("prev_tracks", []),
-                   "Tracked from previous frame")
+    # Panel 2: tracks BEFORE self-merge (post-matching, pre-merge).
+    # Falls back to prev_tracks for older JSON dumps that don't
+    # have tracks_before_self_merge yet.
+    pre_merge = debug_json.get(
+        "tracks_before_self_merge",
+        debug_json.get("prev_tracks", []))
+    _panel_tracks(axes[0, 1], rgb, pre_merge,
+                   "Tracks BEFORE self-merge")
     _panel_matching(axes[1, 0], debug_json.get("owl_dets", []),
                      debug_json.get("matching", {}))
     _panel_tracks(axes[1, 1], rgb, debug_json.get("final_tracks", []),
-                   "Updated after matching")
+                   "Tracks AFTER self-merge (final)")
     fig.suptitle(f"Hungarian matching debug — fid={fid}",
                  fontsize=12, y=0.995)
     fig.savefig(out_path, dpi=110, bbox_inches="tight")

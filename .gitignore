@@ -4,7 +4,7 @@ weights/
 *.pth
 *.ckpt
 
-# Python bytecode
+# Python bytecode / caches
 __pycache__/
 *.py[cod]
 *$py.class
@@ -12,10 +12,28 @@ __pycache__/
 .Python
 *.egg-info/
 .pytest_cache/
-*.png
-
-.claude/*
-logs/*
-tests/visualization_pipeline
-datasets/*
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
 *.pyc
+
+# Logs
+logs/
+*.log
+
+# Visualisation artefacts
+*.png
+*.jpg
+*.jpeg
+*.mp4
+*.gif
+tests/visualization_pipeline/
+latex_tmp/
+*.aux
+*.out
+*.toc
+*.synctex.gz
+
+# Local data + session
+.claude/
+datasets/

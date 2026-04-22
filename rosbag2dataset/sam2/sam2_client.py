@@ -229,6 +229,140 @@ def _bbox_area(b: List[int]) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Track-to-track self-match + vote merge (post-matching duplicate
+# consolidation). Uses the same cost FORMULA as the OWL->track
+# Hungarian matching (mask-mask IoU + label penalty, no score term
+# because tracks don't have a single detection score), applied
+# pairwise between active tracks on the current frame. Hungarian
+# gives the min-cost pairing; pairs below ``max_cost`` are merged.
+# ---------------------------------------------------------------------------
+
+def _merge_tracks_vote(tracks: Dict[int, "TrackState"],
+                        oid_keep: int, oid_drop: int) -> None:
+    """Average-vote merge: absorb ``oid_drop`` into ``oid_keep``.
+
+    * ``label_scores[lbl][fid]``: when both sides have an entry,
+      store their average; otherwise keep whichever side has one.
+      Averaging makes same-frame duplicate observations contribute
+      equally to future ``best_label_mean`` decisions.
+    * ``float_mask``: pixel-wise 50/50 blend -- the "pixel voting"
+      the user wants. If one side has no mask, adopt the other
+      side's mask directly.
+    * ``first_frame``: min of the two.
+
+    After this call, ``tracks[oid_drop]`` is gone; the caller is
+    responsible for removing ``oid_drop`` from ``prop.object_masks``
+    and ``prop.object_bboxes`` as well.
+    """
+    tr_a = tracks[oid_keep]
+    tr_b = tracks[oid_drop]
+    for lbl, sbf_b in tr_b.label_scores.items():
+        target = tr_a.label_scores.setdefault(lbl, {})
+        for fi, sc in sbf_b.items():
+            if fi in target:
+                target[fi] = 0.5 * (float(target[fi]) + float(sc))
+            else:
+                target[fi] = float(sc)
+    tr_a.first_frame = min(tr_a.first_frame, tr_b.first_frame)
+    if tr_b.float_mask is not None:
+        if tr_a.float_mask is None:
+            tr_a.float_mask = tr_b.float_mask.copy()
+        elif tr_a.float_mask.shape == tr_b.float_mask.shape:
+            tr_a.float_mask = (0.5 * tr_a.float_mask
+                                + 0.5 * tr_b.float_mask)
+    tracks.pop(oid_drop, None)
+
+
+def _self_match_and_merge_tracks(
+    tracks: Dict[int, "TrackState"],
+    prop: "PropagatedFrame",
+    max_cost: float,
+    label_penalty: float,
+) -> List[Tuple[int, int, float]]:
+    """Post-matching Hungarian self-match across active tracks.
+
+    Cost per pair:
+        C(t_i, t_j) = (1 - IoU_mask(m_i, m_j)) + label_pen(t_i, t_j)
+    where label_pen is 0 when ``best_label`` agrees and
+    ``label_penalty`` otherwise. No confidence term -- tracks don't
+    have a single score.
+
+    Hungarian on the N x N symmetric cost matrix (diag = +inf) picks
+    an optimal 1-to-1 pairing. We dedupe (i, j) vs (j, i) and apply
+    merges in ascending cost order, skipping any pair whose keep or
+    drop has already been consumed by an earlier merge. This handles
+    the case of three+ mutually-duplicate tracks collapsing into one.
+
+    Winner selection (``keep`` vs ``drop``):
+        1. more ``total_observations`` wins
+        2. ties broken by earlier ``first_frame`` (so identical-
+           evidence pairs have a deterministic outcome).
+
+    Returns the list of applied merges as
+    ``(keep_oid, drop_oid, cost)``.
+    """
+    active = [(oid, mask) for oid, mask in prop.object_masks.items()
+              if oid in tracks and mask is not None
+              and int(mask.sum()) > 0]
+    n = len(active)
+    if n <= 1:
+        return []
+    BIG = 1e6
+    cost_mx = np.full((n, n), BIG, dtype=np.float64)
+    for i in range(n):
+        oid_i, m_i = active[i]
+        lbl_i = tracks[oid_i].label
+        for j in range(i + 1, n):
+            oid_j, m_j = active[j]
+            iou = _mask_mask_iou(m_i, m_j)
+            if iou <= 0.0:
+                continue
+            lbl_j = tracks[oid_j].label
+            pen = 0.0 if lbl_i == lbl_j else label_penalty
+            c = (1.0 - iou) + pen
+            cost_mx[i, j] = c
+            cost_mx[j, i] = c
+    row_ind, col_ind = linear_sum_assignment(cost_mx)
+    pairs_seen: set = set()
+    candidates: List[Tuple[int, int, float]] = []
+    for r, c in zip(row_ind, col_ind):
+        if r == c:
+            continue
+        if cost_mx[r, c] > max_cost:
+            continue
+        key = frozenset((int(r), int(c)))
+        if key in pairs_seen:
+            continue
+        pairs_seen.add(key)
+        candidates.append((int(r), int(c), float(cost_mx[r, c])))
+    candidates.sort(key=lambda x: x[2])
+    applied: List[Tuple[int, int, float]] = []
+    alive = set(oid for oid, _ in active)
+    for r, c, cost in candidates:
+        oid_r = active[r][0]
+        oid_c = active[c][0]
+        if oid_r not in alive or oid_c not in alive:
+            continue
+        n_r = tracks[oid_r].total_observations()
+        n_c = tracks[oid_c].total_observations()
+        if n_r > n_c:
+            keep, drop = oid_r, oid_c
+        elif n_c > n_r:
+            keep, drop = oid_c, oid_r
+        else:
+            if tracks[oid_r].first_frame <= tracks[oid_c].first_frame:
+                keep, drop = oid_r, oid_c
+            else:
+                keep, drop = oid_c, oid_r
+        _merge_tracks_vote(tracks, keep, drop)
+        prop.object_masks.pop(drop, None)
+        prop.object_bboxes.pop(drop, None)
+        alive.discard(drop)
+        applied.append((keep, drop, cost))
+    return applied
+
+
+# ---------------------------------------------------------------------------
 # Debug dump helpers (shared between the matcher and the visualiser)
 # ---------------------------------------------------------------------------
 
@@ -680,6 +814,9 @@ def track_dataset_streaming(dataset_root: str,
                              hungarian_label_penalty: float = 0.2,
                              hungarian_score_weight: float = 0.15,
                              new_seed_min_score: float = 0.25,
+                             self_match_max_cost: float = 0.3,
+                             use_owl_masks: bool = True,
+                             use_fallback: bool = True,
                              owl_mask_timeout: float = 60.0,
                              reset_every: int = 150,
                              reset_buffer_max: int = 100,
@@ -724,7 +861,7 @@ def track_dataset_streaming(dataset_root: str,
       are dropped -- losing them here beats polluting the fresh
       session with stale bboxes that cascade into track-explosion.
 
-    Per dataset frame (clean 4-step flow):
+    Per dataset frame (clean 5-step flow):
       1. Load OWL detections at this frame.
       2. SAM2 propagate current tracks into this frame.
       3. Hungarian-match OWL dets to tracks. Cost per pair is
@@ -745,10 +882,16 @@ def track_dataset_streaming(dataset_root: str,
          into that track (multiple dets can merge into one track).
          Otherwise, if the det's OWL score >= new_seed_min_score,
          seed a new track via seed_one; else drop it.
-
-    There is no post-propagation NMS merge between tracks.
-    Cross-track mask overlaps are handled entirely through the
-    Hungarian/fallback layer above.
+      5. Track-to-track self-match: reusing the same cost formula
+         (mask-mask IoU + label penalty), Hungarian-pair the active
+         tracks against themselves. Pairs below
+         ``self_match_max_cost`` get merged by vote -- float_masks
+         are 50/50 averaged, label_scores are averaged at shared
+         (label, frame) cells and inherited at the rest. The
+         surviving oid is the one with more observations (tie-break
+         by earlier first_frame). This consolidates duplicates that
+         OWL->track cannot touch because its cost matrix has no
+         track-vs-track cells.
 
     Side concern: if sam2_frame_count >= reset_every we close+reopen
     the SAM2 session and reseed live tracks -- purely a GPU-memory
@@ -993,7 +1136,7 @@ def track_dataset_streaming(dataset_root: str,
                     # cost function falls back to bbox-vs-mask IoU
                     # for any ``None`` slot.
                     owl_masks: List[Optional[np.ndarray]] = []
-                    if owls:
+                    if owls and use_owl_masks:
                         try:
                             owl_masks = _owl_bbox_masks(
                                 rgb, [o.box for o in owls],
@@ -1003,6 +1146,10 @@ def track_dataset_streaming(dataset_root: str,
                             print(f"[sam2-stream] /sam_mask_by_bbox "
                                   f"failed at fid={fid}: {e}")
                             owl_masks = [None] * len(owls)
+                    elif owls:
+                        # Baseline mode: no OWL SAM masks -- pair cost
+                        # falls back to bbox-vs-mask IoU.
+                        owl_masks = [None] * len(owls)
 
                     if debug_record is not None:
                         for _k, _m in enumerate(owl_masks):
@@ -1146,22 +1293,23 @@ def track_dataset_streaming(dataset_root: str,
                             continue
                         best_c = hungarian_max_cost + 1.0
                         best_oid: Optional[int] = None
-                        for entry in track_entries:
-                            c = _pair_cost(j, owl, entry)
-                            if c < best_c:
-                                best_c = c
-                                best_oid = entry[0]
-                        if (best_oid is not None
-                                and best_c <= hungarian_max_cost):
-                            tracks[best_oid].observe(
-                                owl.label, i, owl.score)
-                            if debug_record is not None:
-                                debug_fallback.append({
-                                    "det_idx": int(j),
-                                    "oid": int(best_oid),
-                                    "cost": float(best_c),
-                                })
-                            continue
+                        if use_fallback:
+                            for entry in track_entries:
+                                c = _pair_cost(j, owl, entry)
+                                if c < best_c:
+                                    best_c = c
+                                    best_oid = entry[0]
+                            if (best_oid is not None
+                                    and best_c <= hungarian_max_cost):
+                                tracks[best_oid].observe(
+                                    owl.label, i, owl.score)
+                                if debug_record is not None:
+                                    debug_fallback.append({
+                                        "det_idx": int(j),
+                                        "oid": int(best_oid),
+                                        "cost": float(best_c),
+                                    })
+                                continue
                         if owl.score < new_seed_min_score:
                             if debug_record is not None:
                                 debug_new_seeds.append({
@@ -1209,6 +1357,29 @@ def track_dataset_streaming(dataset_root: str,
                                     else None,
                             })
 
+                    # Debug: snapshot track state AFTER OWL->track
+                    # matching (step 4) but BEFORE the track<->track
+                    # self-match merge (step 5), so the debug viz
+                    # can show what the self-match step actually
+                    # changed this frame.
+                    if debug_record is not None:
+                        debug_record["tracks_before_self_merge"] = (
+                            _dump_tracks_for_debug(prop, tracks))
+
+                    # (5) Track-to-track self-match + vote merge.
+                    # Reuses the Hungarian cost (mask IoU + label
+                    # pen), applied pairwise between active tracks
+                    # on this frame. Pairs below self_match_max_cost
+                    # are merged by voting/averaging. Consolidates
+                    # duplicate SAM2 tracks that the OWL->track
+                    # layer can't delete by construction.
+                    self_merges: List[Tuple[int, int, float]] = []
+                    if self_match_max_cost > 0.0 and len(tracks) >= 2:
+                        self_merges = _self_match_and_merge_tracks(
+                            tracks, prop,
+                            max_cost=self_match_max_cost,
+                            label_penalty=hungarian_label_penalty)
+
                     # Debug: finalise this frame's debug record with
                     # matching internals + the final track state.
                     if debug_record is not None:
@@ -1229,6 +1400,14 @@ def track_dataset_streaming(dataset_root: str,
                         matching_dbg["hungarian"] = debug_hungarian
                         matching_dbg["fallback"] = debug_fallback
                         matching_dbg["new_seeds"] = debug_new_seeds
+                        matching_dbg["self_merges"] = [
+                            {"keep_oid": int(k),
+                             "drop_oid": int(d),
+                             "cost": float(c)}
+                            for k, d, c in self_merges
+                        ]
+                        matching_dbg["self_match_max_cost"] = (
+                            float(self_match_max_cost))
                         debug_record["matching"] = matching_dbg
                         debug_record["final_tracks"] = (
                             _dump_tracks_for_debug(prop, tracks))
@@ -1656,6 +1835,20 @@ def main() -> int:
                          "pass) but are dropped if unmatched -- "
                          "prevents low-confidence hallucinations "
                          "from creating fresh tracks (default: 0.25).")
+    ap.add_argument("--self-match-max-cost", type=float, default=0.3,
+                    help="streaming only: post-matching "
+                         "track-to-track self-match threshold. "
+                         "After the OWL->track matching, every pair "
+                         "of active tracks is scored with the same "
+                         "cost formula (mask-mask IoU + label "
+                         "penalty, no score term). Hungarian picks "
+                         "the min-cost pairing; pairs with cost "
+                         "below this threshold are MERGED by "
+                         "average-voting labels and masks. 0 "
+                         "disables the step (default: 0.3 -- roughly "
+                         "IoU >= 0.7 for same-label pairs; tighter "
+                         "than the OWL->track threshold so only "
+                         "clear duplicates merge).")
     ap.add_argument("--owl-mask-timeout", type=float, default=60.0,
                     help="streaming only: HTTP timeout (seconds) "
                          "for the per-frame /sam_mask_by_bbox call "
@@ -1663,6 +1856,22 @@ def main() -> int:
                          "OWL bbox, which is then matched "
                          "mask-vs-mask against each active track "
                          "(default: 60).")
+    ap.add_argument("--no-owl-masks", dest="use_owl_masks",
+                    action="store_false", default=True,
+                    help="streaming only: skip the "
+                         "/sam_mask_by_bbox call; the Hungarian "
+                         "cost reverts to bbox-vs-mask IoU. Useful "
+                         "for the minimal baseline (OWL + SAM + "
+                         "IoU-class Hungarian only).")
+    ap.add_argument("--no-fallback", dest="use_fallback",
+                    action="store_false", default=True,
+                    help="streaming only: skip the single-"
+                         "direction greedy absorption of "
+                         "Hungarian-rejected detections. Dets that "
+                         "don't match via Hungarian go directly "
+                         "to the seed path (gated by "
+                         "--new-seed-min-score). Reproduces the "
+                         "baseline OWL+SAM+Hungarian behaviour.")
     ap.add_argument("--reset-every", type=int, default=150,
                     help="streaming only: close+reopen the SAM2 "
                          "session every N sam2_frame_count steps and "
@@ -1707,6 +1916,9 @@ def main() -> int:
             hungarian_label_penalty=args.hungarian_label_penalty,
             hungarian_score_weight=args.hungarian_score_weight,
             new_seed_min_score=args.new_seed_min_score,
+            self_match_max_cost=args.self_match_max_cost,
+            use_owl_masks=args.use_owl_masks,
+            use_fallback=args.use_fallback,
             owl_mask_timeout=args.owl_mask_timeout,
             reset_every=args.reset_every,
             reset_buffer_max=args.reset_buffer_max,
