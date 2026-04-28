@@ -348,8 +348,25 @@ _Q_STATIC_STABLE      = np.diag([1e-8]*3  + [1e-8]*3)   # effectively frozen
 _Q_STATIC_UNSTABLE    = np.diag([1e-5]*3  + [1e-5]*3)   # slow drift
 _Q_IDLE_DEFAULT       = np.diag([1e-6]*3  + [1e-6]*3)   # idle re-observation
 _Q_JUST_RELEASED      = np.diag([1e-3]*3  + [1e-3]*3)   # may settle/roll
-_Q_GRASPING_RELEASING = np.diag([1.0]*3   + [1.0]*3)    # essentially unknown
-_Q_HOLDING_BASE_FRAME = np.diag([1e-8]*3  + [1e-8]*3)   # rigid to EE in base
+# Held object during grip closing/opening: a transient larger Q than
+# steady holding (the object can shift inside the closing jaws by a
+# few cm before the grip stabilises) but bounded by the proprio
+# anchor — we know the gripper pose to mm via T_bg, so the held
+# object's pose can't be "essentially unknown". A 1.0 m std (the
+# original placeholder) explodes the cov 100x in one frame and
+# defeats the rigid-attachment predict.
+_Q_GRASPING_RELEASING = np.diag([0.02**2]*3 + [0.10**2]*3)
+                                                  # 2 cm trans, ~6° rot
+# Held object, base-frame fusion. The rigid-attachment mean model
+# (μ ← ΔT_bg · μ) is only *approximately* correct: proprioception has
+# ~mm-scale noise, the object can slip in the grip by cm, and the
+# per-frame centroid-from-mask is noisy. Treating this as "effectively
+# frozen" (1e-8) collapses the gate and every new detection goes to
+# birth. A per-frame growth of √(2.5e-4) = 1.6 cm (trans) /
+# √(1e-3) = 1.8 deg (rot) reaches P_max in ~250 frames of occlusion,
+# which matches the physical reality (after ~8 s of not seeing a held
+# object, we should expect ≥25 cm uncertainty).
+_Q_HOLDING_BASE_FRAME = np.diag([2.5e-4]*3 + [1e-3]*3)  # grip slack + proprio jitter
 _Q_HELD_WORLD_FRAME   = np.diag([1e-4]*3  + [1e-4]*3)   # inherits base drift
 
 

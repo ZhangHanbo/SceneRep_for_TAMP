@@ -32,14 +32,47 @@
 \section{Problem formulation}\label{sec:problem}
 %-----------------------------------------------------------------------------
 
-\subsection{Setting and per-object state}
+\subsection{Setting, frames, and per-object state}\label{subsec:setting}
 
-A calibrated RGB-D camera observes a tabletop workspace populated by an
-unknown, time-varying number of rigid objects. A separate SLAM module is
-treated as a black box: it supplies, at every frame $k$, the camera pose
-$T_{cw,k}\!\in\!\SE$ with covariance $\Sigma_{cw,k}\!\in\!\R^{6\times6}$
-in the $\se$ tangent. That is the only SLAM interaction in what follows.
+A calibrated RGB-D camera mounted at a fixed extrinsic
+$T_{bc}\!\in\!\SE$ on a mobile robot observes a tabletop workspace
+populated by an unknown, time-varying number of rigid objects.
+We work with three frames throughout:
+\begin{itemize}[leftmargin=2em,topsep=2pt,itemsep=0pt]
+\item the world (map) frame $w$,
+\item the robot base frame $b$, and
+\item the camera frame $c$, with $T_{bc}$ a known kinematic constant
+      (read from the URDF; on Fetch-class robots this is a fixed
+      head-to-base transform). Camera-in-base lets us interconvert
+      $T_{co}=T_{bc}^{-1}T_{bo}$ at zero variance.
+\end{itemize}
 
+Two external streams are treated as black boxes:
+\begin{itemize}[leftmargin=2em,topsep=0pt]
+\item \textbf{Localization} supplies, at every frame $k$, the
+      base-in-world Gaussian pose $T_{wb,k}\!\in\!\SE$,
+      $\Sigma_{wb,k}\!\in\!\R^{6\times 6}$. Crucially, only its
+      \emph{relative} change between consecutive frames,
+      \(
+         \Delta T_{wb,k} \;\triangleq\; T_{wb,k}\,T_{wb,k-1}^{-1}\!\in\!\SE,
+      \)
+      enters the recursion as a control input
+      (\S\ref{sec:ekf}, eq.~\ref{eq:control}); the absolute
+      $(T_{wb,k}, \Sigma_{wb,k})$ enters \emph{only} at the
+      world-frame output composition step (\S\ref{sec:emit}). $\sum_{wb,k}$
+      \emph{never} appears inside the per-object recursion --- this is
+      the key design choice that decouples object-pose tracking from
+      localization uncertainty.
+\item \textbf{Proprioception} supplies the gripper-in-base pose
+      $T_{bg,k}\!\in\!\SE$ from joint encoders (deterministic at the
+      Bayesian level). Its relative change
+      \(
+         \Delta T_{bg,k} \;\triangleq\; T_{bg,k}\,T_{bg,k-1}^{-1}
+      \)
+      is the control input for held / manipulation-set objects.
+\end{itemize}
+
+\paragraph{Per-object state.}
 The tracker maintains, online, a variable-size indexed family of
 \emph{track parameters}
 \begin{equation}
@@ -49,19 +82,35 @@ The tracker maintains, online, a variable-size indexed family of
    \label{eq:obj_state}
 \end{equation}
 with four attributes per index: a class label $\ell^{(i)}\!\in\!\mathcal L$
-(fixed at birth), a world-frame pose $T^{(i)}_k\!\in\!\SE$, its
-covariance $P^{(i)}_k\!\in\!\R^{6\times 6}$ in the $\se$ tangent at
+(fixed at birth), a \emph{base-frame pose}
+$T^{(i)}_k\!\in\!\SE$ (object-in-base, $T_{bo}^{(i)}$ in the long form),
+its covariance $P^{(i)}_k\!\in\!\R^{6\times 6}$ in the $\se$ tangent at
 $T^{(i)}_k$, and an existence probability $r^{(i)}_k\!\in\![0,1]$ (the
 prior-probability that the object referred to by index $i$ actually
 exists at time $k$). The index set $\mathcal I_k\subseteq\mathbb{N}$ is
 maintained by the tracker (birth enlarges it, pruning shrinks it).
 
 The physical multi-target state at time $k$ is a \emph{random finite
-set} $\mathcal T_k\subseteq\SE$ of world-frame poses, one per object
-actually present. Its (unknown) cardinality is $n_k=|\mathcal T_k|$.
+set} $\mathcal T_k\subseteq\SE$ of \emph{base-frame} poses, one per
+object actually present. Its (unknown) cardinality is $n_k=|\mathcal T_k|$.
 The parameter family $\mathcal X_k$ is the tracker's summary of the
-posterior on $\mathcal T_k$; the relationship is made precise in
-\S\ref{sec:bern}.
+posterior on $\mathcal T_k$ \emph{conditioned on the localization stream}
+$\{T_{wb,k},\Sigma_{wb,k}\}_k$; the relationship is made precise in
+\S\ref{sec:bern}. World-frame quantities $T_{wo}^{(i)}$ are recovered
+from the base-frame state by composition with $T_{wb,k}$ at output
+(\S\ref{sec:emit}).
+
+\paragraph{Why base frame.}
+The naïve world-frame alternative (store $T_{wo}^{(i)}$, fold
+$\Sigma_{wb,k}$ into the measurement noise $R_k$ via
+$R_{\mathrm{eff}}=R_{\mathrm{icp}}+\Sigma_{wb,k}$) is correct for one
+frame but \emph{double-counts} $\Sigma_{wb,k}$ across consecutive
+fusions, because $T_{wb,k}$ and $T_{wb,k+1}$ are nearly the same random
+variable. That recursion drives $\Sigma_{wo}$ below $\Sigma_{wb}$,
+which is physically impossible for a static object. Storing in base
+frame removes $\Sigma_{wb,k}$ from the recursion entirely; it appears
+only once, in the world-frame composition at output, where it
+correctly lower-bounds $\Sigma_{wo}$.
 
 A per-object shape summary $\mathcal G^{(i)}_k$ (TSDF volume plus
 accumulated masked point cloud, rigidly attached to $T^{(i)}_k$) is
@@ -116,9 +165,20 @@ $\mathcal G^{(i)}_{k-1}$. Each frame therefore executes
 \end{equation}
 Concretely, for each mask $m_{k,l}$:
 \begin{enumerate}[leftmargin=2em,topsep=2pt,itemsep=1pt]
-\item \textbf{Back-projection.} The masked pixels of $D_k$ yield a world-frame point cloud $\mathcal C_{k,l}$ via $T_{cw,k}$ and the intrinsics.
+\item \textbf{Back-projection.} The masked pixels of $D_k$ yield a \emph{camera-frame} point cloud $\mathcal C_{k,l}\subset\R^3$ via the intrinsics $K$ and the depth values; localization is \emph{not} needed for this step.
 \item \textbf{Association.} A cost-matrix assignment (\S\ref{sec:data-assoc}) decides whether $\mathcal C_{k,l}$ belongs to an existing track $i$, or spawns a new one.
-\item \textbf{Pose measurement.} For a matched pair, colored ICP of $\mathcal C_{k,l}$ against $\mathcal G^{(i)}_{k-1}$, initialised at the prior mean $T^{(i)}_{k|k-1}$, produces a pose estimate $\hat T_{k,l}\!\in\!\SE$ and a covariance $\hat R_{k,l}\!\in\!\R^{6\times 6}$ that folds ICP fitness/residual together with $\Sigma_{cw,k}$ through the $\SE$ adjoint. For an unmatched mask we take $\hat T_{k,l}$ from the centroid of $\mathcal C_{k,l}$ with identity rotation and inflate $\hat R_{k,l}$ as a birth prior.
+\item \textbf{Pose measurement.} For a matched pair, ICP of $\mathcal C_{k,l}$ against $\mathcal G^{(i)}_{k-1}$ (the latter expressed in the object-local frame and initialised at the prior mean $T^{(i)}_{k|k-1}$ projected to camera space) produces a camera-frame pose estimate $\hat T^{co}_{k,l}\!\in\!\SE$ and a covariance $\hat R^{co}_{k,l}\!\in\!\R^{6\times 6}$ derived from ICP fitness / residual. We then promote both to the base frame using the fixed kinematic $T_{bc}$:
+\begin{equation}
+   \hat T_{k,l} \;=\; T_{bc}\,\hat T^{co}_{k,l},\qquad
+   \hat R_{k,l} \;=\; \operatorname{Ad}(T_{bc})\,\hat R^{co}_{k,l}\,
+                       \operatorname{Ad}(T_{bc})^{\!\top}.
+   \label{eq:meas_compose}
+\end{equation}
+$\Sigma_{wb,k}$ is \emph{not} folded into $\hat R_{k,l}$ here -- it
+plays no role until output composition (\S\ref{sec:emit}). For an
+unmatched mask we take $\hat T^{co}_{k,l}$ from the centroid of
+$\mathcal C_{k,l}$ with identity rotation and inflate $\hat R^{co}_{k,l}$
+as a birth prior.
 \end{enumerate}
 Only after \eqref{eq:pipeline} runs does the filter consume
 $(\hat T_{k,l},\hat R_{k,l})$ as the measurement of an EKF update
@@ -127,12 +187,13 @@ yesterday's state is what makes today's measurement well-defined.
 
 \subsection{Estimation target and pathologies}
 
-Conditioned on the SLAM pose stream, the Bayesian target is the
-multi-target set posterior
+Conditioned on the localization and proprioception streams, the
+Bayesian target is the multi-target set posterior over
+\emph{base-frame} poses
 \begin{equation}
    f_k(\mathcal T) \;\triangleq\;
        p\!\Bigl(\mathcal T_k=\mathcal T \;\Big|\;
-                Z_{1:k},\,T_{cw,1:k},\,\Sigma_{cw,1:k}\Bigr).
+                Z_{1:k},\,T_{wb,1:k},\,\Sigma_{wb,1:k},\,T_{bg,1:k}\Bigr).
    \label{eq:target}
 \end{equation}
 The tracker represents $f_k$ by the family $\mathcal X_k$ of
@@ -202,36 +263,211 @@ lives in $\R^6$, attached to the tangent space at $T_0$.
 \section{Extended Kalman filter on $\SE$ (single target)}\label{sec:ekf}
 %-----------------------------------------------------------------------------
 
-For one rigid object, our process model is constant pose with
-$\R^6$ tangent-space process noise applied multiplicatively on the
-right:
+\subsection*{Overview and notation}
+
+Treat each tracked object in isolation. The pose belief at time $k$ is a
+Gaussian on $\SE$ in the body-tangent parametrisation of \S\ref{sec:se3}:
+the mean is $T_k\!\in\!\SE$ (a $4\!\times\!4$ rigid transform of the
+object frame in the world frame), and the spread around it is the
+$6\!\times\!6$ covariance
+\(
+   P_k \;=\; \mathrm{cov}\bigl(\xi_k\bigr),\;\; \xi_k\sim\Norm(\bm 0, P_k),
+\)
+with $\xi=(\rho,\omega)$ the local twist that perturbs $T_k$ via
+$T_k\,\Exp(\xi)$. When we write $T_{k|k-1}, P_{k|k-1}$ we mean the
+\emph{predicted} mean / covariance after the process step but before
+incorporating the frame-$k$ measurement; $T_{k|k}, P_{k|k}$ are their
+\emph{posterior} counterparts after the update.
+
+The recursion is the standard Extended Kalman filter on a Lie group,
+specialised to (a) constant-pose dynamics and (b) right-multiplicative,
+tangent-Gaussian process / measurement noise. Each frame:
+
+\begin{enumerate}[leftmargin=2em,topsep=2pt,itemsep=1pt]
+\item \textbf{Predict.} Apply the known control input $u_k\!\in\!\SE$
+      (\S\ref{subsec:setting}: $\Delta T_{wb,k}^{-1}$ for world-static
+      objects, $\Delta T_{bg,k}$ for held / manipulation-set objects,
+      $u_k=I$ as the trivial fallback) to the mean by left
+      multiplication, $\operatorname{Ad}$-conjugate the covariance, add
+      $Q_k$, then cap with the saturation projector $\Phi$. $Q_k$
+      encodes the residual per-frame dynamics not explained by $u_k$:
+      tiny for a stationary world-static object (most of $Q_k$ work is
+      done by $u_k=\Delta T_{wb,k}^{-1}$), small slack
+      $Q_{\text{manip}}$ for held objects (grip slip / deformation),
+      large during grasp/release transitions when $u_k$ is unreliable.
+      Supplied by the manipulation context
+      (\texttt{ekf\_se3.process\_noise\_for\_phase}).
+\item \textbf{Measure.} The frame's mask is back-projected to a
+      \emph{camera-frame} 3-D cloud and registered (ICP,
+      \S\ref{subsec:bottleneck}) against the track's shape summary,
+      yielding $\hat T^{co}_{k,l}\!\in\!\SE$ and
+      $\hat R^{co}_{k,l}\!\in\!\R^{6\times 6}$. The fixed kinematic
+      $T_{bc}$ promotes both to the base frame at zero variance:
+      $z_k=T_{bc}\hat T^{co}_{k,l}$,
+      $R_k=\operatorname{Ad}(T_{bc})\hat R^{co}_{k,l}\operatorname{Ad}(T_{bc})^{\!\top}$
+      (eq.~\ref{eq:meas_compose}). $\Sigma_{wb,k}$ does \emph{not}
+      enter $R_k$.
+\item \textbf{Update.} Linearise both the prior Gaussian and the
+      observation in the tangent at $T_{k|k-1}$. The linearised
+      innovation $\nu_k=\Log\!\bigl(T_{k|k-1}^{-1}z_k\bigr)\!\in\!\R^6$
+      lives in the same $6$-vector space as $\xi$; with $H_k=I_6$ the
+      Kalman gain is $K_k = P_{k|k-1}S_k^{-1}$, $S_k=P_{k|k-1}+R_k$.
+      The mean is corrected on the manifold via right-multiplication by
+      $\Exp(K_k\nu_k)$; the covariance is updated in Joseph form and
+      then $\Phi$-saturated.
+\end{enumerate}
+
+\paragraph{Glossary of variables (this section).}
+\begin{description}[leftmargin=2em,topsep=2pt,itemsep=0pt,labelindent=0em]
+\item[$T_k$, $P_k$.] Posterior \emph{base-frame} object pose mean and
+      tangent covariance at frame $k$ ($T_{bo,k}^{(i)}$ in the long
+      form). $T_k\!\in\!\SE$ as a $4\!\times\!4$ matrix;
+      $P_k\!\in\!\R^{6\times 6}$ symmetric PD. Maintained recursively
+      (initialised at birth, \S\ref{sec:birth}; never measured directly).
+\item[$T_{k|k-1}$, $P_{k|k-1}$.] Predicted mean / covariance produced by step~1.
+\item[$u_k$.] Known control input in $\SE$ supplied by external streams:
+      \[
+        u_k =
+        \begin{cases}
+          \Delta T_{bg,k} = T_{bg,k}T_{bg,k-1}^{-1}, & i\in\text{manipulation set} \\
+          \Delta T_{wb,k}^{-1} = T_{wb,k-1}T_{wb,k}^{-1}, & \text{otherwise (world-static).}
+        \end{cases}
+      \]
+      The first form is the gripper change in base (proprioception);
+      the second is the inverse base motion (a world-static object's
+      base-frame pose moves opposite to the base). $u_k = I$ on the
+      first frame (no $\Delta$).
+\item[$\xi_k$, $\nu_k$.] $\R^6$ vectors in the body tangent at
+      $T_{k-1}$ and $T_{k|k-1}$ respectively. $\xi_k$ is the
+      \emph{unmodelled} per-frame perturbation (anything not captured by
+      $u_k$); $\nu_k$ is the observed innovation.
+\item[$Q_k$.] $6\!\times\!6$ process-noise covariance for the residual
+      after $u_k$ is applied, supplied externally per manipulation
+      phase (\texttt{process\_noise\_for\_phase}; not estimated).
+\item[$z_k$, $R_k$.] \emph{Base-frame} measurement and its covariance.
+      $z_k = T_{bc}\hat T^{co}_{k,l}\!\in\!\SE$ from per-mask ICP
+      against $\mathcal G^{(i)}_{k-1}$ promoted to base via $T_{bc}$;
+      $R_k = \operatorname{Ad}(T_{bc})\hat R^{co}_{k,l}\operatorname{Ad}(T_{bc})^{\!\top}$
+      blends ICP residuals only -- $\Sigma_{wb,k}$ is excluded.
+\item[$T_{bc}$.] Fixed camera-in-base extrinsic (kinematic constant).
+\item[$\Delta T_{wb,k}$, $\Delta T_{bg,k}$.] Frame-to-frame deltas of
+      base-in-world (from localization) and gripper-in-base (from
+      proprioception); see \S\ref{subsec:setting}.
+\item[$S_k$, $K_k$, $H_k$.] Innovation covariance, Kalman gain,
+      observation Jacobian. $H_k=I_6$ to first order in $\nu_k$.
+\item[$\Phi$, $P_{\max}$.] Covariance-saturation projector
+      (eq.~\ref{eq:phi}) and its design constant $P_{\max}\!\succ\!\bm 0$;
+      caps $\Tr P$ at $\Tr P_{\max}$ so the recursion is self-bounded
+      under arbitrarily long missing-observation streaks.
+\item[$d_k^2$, $\mathcal L(z_k\!\mid\!\cdot)$.] Mahalanobis squared
+      distance $\nu_k^{\!\top}S_k^{-1}\nu_k$ (eq.~\ref{eq:mahal}) and
+      the Gaussian innovation likelihood (eq.~\ref{eq:ekf_lik}); both
+      consumed downstream by the Bernoulli existence update
+      (\S\ref{sec:update}) and the Hungarian cost matrix
+      (\S\ref{sec:data-assoc}).
+\end{description}
+
+The remainder of the section makes the three steps quantitative.
+
+\subsection*{Process and measurement models}
+
+Tracking happens in the \emph{robot base frame} throughout. For one
+rigid object, the process model is a known left-multiplicative control
+$u_k\!\in\!\SE$ followed by $\R^6$ tangent-space process noise applied
+on the right:
 \begin{equation}
-   T_k \;=\; T_{k-1}\,\Exp(\xi_k),\qquad
+   T_k \;=\; u_k\,T_{k-1}\,\Exp(\xi_k),\qquad
    \xi_k\sim\Norm(\bm 0,Q_k).\label{eq:proc}
 \end{equation}
-$Q_k$ encodes the per-frame dynamics prior (small when the object is
-stationary, larger during grasp/transport events; its value is selected
-externally by the manipulation context and is not estimated here). The
-measurement is an ICP-derived noisy pose (cf.\ \S\ref{subsec:bottleneck}),
-modelled the same way:
+$u_k$ encodes how a deterministic external action moves the object's
+\emph{base-frame} pose between frames:
 \begin{equation}
-   z_k \;=\; T_k\,\Exp(\eta_k),\qquad \eta_k\sim\Norm(\bm 0,R_k).
+   u_k \;=\;
+   \begin{cases}
+      T_{bg,k}\,T_{bg,k-1}^{-1},
+        & i\in\text{manipulation set (held / on / in)}, \\[2pt]
+      T_{wb,k}^{-1}\,T_{wb,k-1},
+        & \text{otherwise (world-static object)}.
+   \end{cases}
+   \label{eq:control}
+\end{equation}
+Both expressions are derived below from the constraint that the
+\emph{world-frame} pose of the object is conserved (static) or
+identified with the gripper (held). In both cases $u_k$ is the
+\textbf{body-frame} inverse of the base/gripper motion, not the
+world-frame inverse: $T_{wb,k}^{-1}T_{wb,k-1}\!\ne\!T_{wb,k-1}T_{wb,k}^{-1}$
+in general. Mistaking the latter for the former produces $\sim$1\,m
+drift on a typical mobile-manipulator trajectory because the conjugate
+transformation differs by an adjoint rotation -- enforced experimentally
+on the apple\_in\_the\_tray sequence (\S\ref{sec:approx} A.7 caveat).
+
+Both $T_{wb,k}$ and $T_{bg,k}$ are external streams
+(\S\ref{subsec:setting}); we treat them as point estimates -- the
+implementation feeds in $T_{wb,k}$ as the SLAM mean and $T_{bg,k}$ from
+joint encoders. Localization uncertainty $\Sigma_{wb,k}$ does
+\emph{not} enter $u_k$ or $Q_k$; it appears once at the world-frame
+output composition (\S\ref{sec:emit}).
+
+\paragraph{Justification of the two regimes.}
+\emph{World-static object.} If $T_{wo}^{(i)}$ is constant then
+\(
+   T_{wb,k}\,T_{bo,k}^{(i)} = T_{wb,k-1}\,T_{bo,k-1}^{(i)}
+\)
+and so
+\(
+   T_{bo,k}^{(i)}
+     = T_{wb,k}^{-1}\,T_{wb,k-1}\,T_{bo,k-1}^{(i)}
+     = u_k\,T_{bo,k-1}^{(i)}
+\)
+with $u_k=T_{wb,k}^{-1}T_{wb,k-1}$.
+\emph{Held object.} If the object is rigidly attached to the gripper
+($T_{go}^{(i)}\!=$const), then
+\(
+   T_{bo,k}^{(i)}=T_{bg,k}T_{go}^{(i)}
+     =T_{bg,k}T_{bg,k-1}^{-1}T_{bo,k-1}^{(i)}
+     =u_k\,T_{bo,k-1}^{(i)}
+\)
+with $u_k=T_{bg,k}T_{bg,k-1}^{-1}$ -- the gripper's relative motion is
+naturally a left-form transform here because $T_{bo}$ and $T_{bg}$
+share the base frame on the left of the composition. Setting $u_k=I$
+recovers the standard constant-pose model.
+
+$Q_k$ encodes the residual per-frame dynamics not explained by $u_k$:
+small slack for held objects (grip slip), tiny drift for static objects
+(SLAM noise leaks already captured by $u_k$), large during
+grasp/release transitions when the regime is switching and $u_k$ is
+unreliable. Supplied externally by the manipulation context.
+
+The measurement is an ICP-derived noisy pose lifted to the base frame
+(cf.\ \S\ref{subsec:bottleneck}), modelled the same way:
+\begin{equation}
+   z_k \;=\; T_k\,\Exp(\eta_k),\qquad \eta_k\sim\Norm(\bm 0,R_k),
    \label{eq:meas}
 \end{equation}
-$R_k$ absorbs ICP uncertainty composed with the SLAM pose covariance
-$\Sigma_{cw,k}$.
+where $z_k = T_{bc}\hat T^{co}_{k,l}$ and
+$R_k = \operatorname{Ad}(T_{bc})\hat R^{co}_{k,l}\operatorname{Ad}(T_{bc})^{\!\top}$
+(eq.~\ref{eq:meas_compose}). $R_k$ absorbs only ICP uncertainty;
+$\Sigma_{wb,k}$ is excluded by construction.
 
-\paragraph{Predict.} Eq.\,\eqref{eq:proc} is \emph{first-order identity}
-in the tangent at $T_{k-1|k-1}$: writing the prior as
-$T_{k-1|k-1}\Exp(\xi_{k-1|k-1})$ with $\xi_{k-1|k-1}\!\sim\!\Norm(\bm 0,
-P_{k-1|k-1})$, the predicted pose is
-$T_k = T_{k-1|k-1}\Exp(\xi_{k-1|k-1})\Exp(\xi_k)
-     = T_{k-1|k-1}\Exp(\xi_{k-1|k-1}+\xi_k+\tfrac12[\xi_{k-1|k-1},\xi_k]+\cdots)$
-by Baker--Campbell--Hausdorff. Dropping second-order and higher brackets
-(the standard EKF-on-Lie-group linearisation) yields
-$\xi_{k|k-1}\approx\xi_{k-1|k-1}+\xi_k\sim\Norm(\bm 0, P_{k-1|k-1}+Q_k)$,
-so the Jacobian of the process is $F_k = I_6$. Applying the
-\emph{covariance-saturation projector}
+\paragraph{Predict.} Eq.\,\eqref{eq:proc} composes a known SE(3)
+left-multiplication $u_k$ with right-multiplicative tangent noise.
+Writing the prior as $T_{k-1|k-1}\Exp(\xi_{k-1|k-1})$ with
+$\xi_{k-1|k-1}\!\sim\!\Norm(\bm 0,P_{k-1|k-1})$, the predicted pose is
+\begin{align*}
+T_k &= u_k\,T_{k-1|k-1}\,\Exp(\xi_{k-1|k-1})\,\Exp(\xi_k) \\
+    &= \bigl[u_k\,T_{k-1|k-1}\bigr]\,
+       \Exp\!\bigl(\xi_{k-1|k-1}+\xi_k+\tfrac12[\xi_{k-1|k-1},\xi_k]+\cdots\bigr)
+\end{align*}
+by Baker--Campbell--Hausdorff. Dropping second-order and higher
+brackets (the standard EKF-on-Lie-group linearisation) yields
+$\xi_{k|k-1}\!\approx\!\xi_{k-1|k-1}+\xi_k\!\sim\!\Norm(\bm 0,
+P_{k-1|k-1}+Q_k)$ in the tangent at the \emph{shifted} mean
+$u_kT_{k-1|k-1}$. Because $u_k$ acts on the left of the original mean,
+the original tangent vectors transport to the new mean by the adjoint
+$\operatorname{Ad}(u_k)$\,\cite{MurrayLiSastry1994}, so the prior
+covariance reaches the new tangent as
+$\operatorname{Ad}(u_k)\,P_{k-1|k-1}\,\operatorname{Ad}(u_k)^\top$.
+Applying the \emph{covariance-saturation projector}
 \begin{equation}
    \Phi:\R^{6\times6}\to\R^{6\times6},\qquad
    \Phi(P) \;\triangleq\; \min\!\bigl(1,\,\Tr P_{\max}/\Tr P\bigr)\,P,
@@ -240,13 +476,17 @@ so the Jacobian of the process is $F_k = I_6$. Applying the
 for a chosen design constant $P_{\max}\!\succ\!\bm 0$ (a static
 uninformative prior, $\Tr P_{\max}\!>\!0$), the predict step is
 \begin{align}
-   T_{k|k-1} &= T_{k-1|k-1},\label{eq:ekf_T_pred}\\
-   P_{k|k-1} &= \Phi\!\bigl(P_{k-1|k-1} + Q_k\bigr).\label{eq:ekf_P_pred}
+   T_{k|k-1} &= u_k\,T_{k-1|k-1},\label{eq:ekf_T_pred}\\
+   P_{k|k-1} &= \Phi\!\bigl(\operatorname{Ad}(u_k)\,P_{k-1|k-1}\,
+                              \operatorname{Ad}(u_k)^\top + Q_k\bigr).
+                \label{eq:ekf_P_pred}
 \end{align}
-$\Phi$ preserves symmetry and positive-definiteness (scaling by a positive
-scalar) and caps the trace at $\Tr P_{\max}$: the recursion is
-self-bounded under arbitrarily long missing-observation streaks. Without
-it $P$ grows linearly in the number of missed frames.
+When $u_k\!=\!I$ this collapses to the constant-pose form $T_{k|k-1}=T_{k-1|k-1}$,
+$P_{k|k-1}=\Phi(P_{k-1|k-1}+Q_k)$. $\Phi$ preserves symmetry and
+positive-definiteness (scaling by a positive scalar) and caps the trace
+at $\Tr P_{\max}$: the recursion is self-bounded under arbitrarily long
+missing-observation streaks. Without it $P$ grows linearly in the
+number of missed frames.
 
 \paragraph{Update.} The innovation, residual covariance, and Kalman gain
 are
@@ -378,7 +618,8 @@ $p_s\!\in\!(0,1]$, prediction is the standard PMBM step (eq.\,(43) in
 \begin{align}
    (T^{(i)}_{k|k-1},P^{(i)}_{k|k-1})
        &\quad\text{via EKF predict
-                  \eqref{eq:ekf_T_pred}--\eqref{eq:ekf_P_pred} with $Q^{(i)}_k$,}\nonumber\\[2pt]
+                  \eqref{eq:ekf_T_pred}--\eqref{eq:ekf_P_pred} with
+                  $u^{(i)}_k$, $Q^{(i)}_k$,}\nonumber\\[2pt]
    r^{(i)}_{k|k-1} &= p_s\,r^{(i)}_{k-1|k-1}.\label{eq:bern_pred_r}
 \end{align}
 $p_s$ is the (observer-independent) physical survival probability of
@@ -390,8 +631,10 @@ disappearance (rare in our domain). Crucially, $p_s$ is \emph{not}
 visibility-dependent: occlusion-induced ``invisibility'' does not
 affect physical survival; it only affects the observer's ability to
 detect, which enters the recursion through $\tilde p_d$ in the missed
-update (\S\ref{sec:update}). $Q^{(i)}_k$ is supplied by the manipulation
-context and reused unchanged from the existing implementation.
+update (\S\ref{sec:update}). $u^{(i)}_k$ is the per-track control input
+(eq.~\ref{eq:control}) that depends on whether $i$ is in the
+manipulation set; $Q^{(i)}_k$ is the residual process noise supplied by
+the manipulation context.
 
 Object birth is folded into data association (\S\ref{sec:birth}); we do
 not maintain a continuous Poisson birth intensity.
@@ -595,8 +838,11 @@ i.e.\ the pinhole projection of the object-origin in the camera frame
 onto the image plane (with depth-positive gate). For tracks $i\!\ne\!j$,
 let $A^{(i)}_k\!\subseteq\!\Omega_{\text{img}}$ be the image-space
 axis-aligned bounding box of track $i$'s shape summary
-$\mathcal G^{(i)}_{k-1}$ projected through $T_{cw,k}^{-1}T^{(i)}_{k|k-1}$,
-and $\bar d^{(i)}_k$ its mean projected depth. Define the occlusion
+$\mathcal G^{(i)}_{k-1}$ projected through
+$T_{co}^{(i)}\!=\!T_{bc}^{-1}T^{(i)}_{k|k-1}$ (the base-frame mean
+lifted to the camera frame via the fixed kinematic $T_{bc}$;
+localization plays no role here), and $\bar d^{(i)}_k$ its mean
+projected depth. Define the occlusion
 coefficient
 \begin{equation}
    \rho_{ij,k} \;\triangleq\;
@@ -609,7 +855,7 @@ by $j$ in the image and \emph{in front of} $i$ along the viewing ray.
 Distant or non-overlapping $j$ contribute $\rho_{ij,k}\!=\!0$. Then
 \begin{equation}
    p_v^{(i)} \;=\;
-   \mathbb 1\!\bigl[\pi_K\!\bigl(T_{cw,k}^{-1}\,T^{(i)}_{k|k-1}\bigr)\in\Omega_{\text{img}}\bigr]
+   \mathbb 1\!\bigl[\pi_K\!\bigl(T_{bc}^{-1}\,T^{(i)}_{k|k-1}\bigr)\in\Omega_{\text{img}}\bigr]
    \;\cdot\;\prod_{j\in\mathcal I_{k-1}\setminus\{i\}}\bigl(1-\rho_{ij,k}\bigr).
    \label{eq:pv}
 \end{equation}
@@ -620,7 +866,7 @@ $O(|\mathcal I_{k-1}|^2)$ on bounding boxes; rendering-based refinement
 any other equation.
 
 %-----------------------------------------------------------------------------
-\section{Pruning and output}
+\section{Pruning and output}\label{sec:emit}
 %-----------------------------------------------------------------------------
 
 After update, prune any track with $r^{(i)}_{k|k}<r_{\min}$
@@ -629,30 +875,174 @@ unobserved-but-expected frames sees its existence collapse via repeated
 application of \eqref{eq:r_miss}, and is removed naturally without an
 ad-hoc M-of-N counter.
 
-The output at frame $k$ is the labelled MAP estimate
+The output at frame $k$ is the labelled MAP estimate -- in
+\emph{base frame}, the native frame of the recursion:
 \begin{equation}
    \widehat{\mathcal X}_k = \Bigl\{\,
        (i,\;\ell^{(i)},\;T^{(i)}_{k|k},\;P^{(i)}_{k|k},\;r^{(i)}_{k|k})\;:\;
        i\in\mathcal I_k,\ r^{(i)}_{k|k}\ge r_{\text{conf}}
-   \,\Bigr\}.
+   \,\Bigr\},
+   \label{eq:emit_base}
 \end{equation}
+where $T^{(i)}_{k|k}=T_{bo,k|k}^{(i)}$ and
+$P^{(i)}_{k|k}=P_{bo,k|k}^{(i)}$ are object-in-base.
+
+\paragraph{World-frame composition (the only place $\Sigma_{wb,k}$ enters).}
+Downstream consumers that work in world frame (planning, scene-graph
+visualisation across episodes) compose with the current localization
+posterior:
+\begin{align}
+   T_{wo,k}^{(i)} &= T_{wb,k}\,T_{bo,k|k}^{(i)},
+       \label{eq:wo_mean}\\
+   \Sigma_{wo,k}^{(i)} &= \operatorname{Ad}\!\bigl((T_{bo,k|k}^{(i)})^{-1}\bigr)\,
+                          \Sigma_{wb,k}\,
+                          \operatorname{Ad}\!\bigl((T_{bo,k|k}^{(i)})^{-1}\bigr)^{\!\top}
+                       + P_{bo,k|k}^{(i)},
+       \label{eq:wo_cov}
+\end{align}
+under the working assumption $\delta_{wb}\!\perp\!\delta_{bo}$ (a
+reasonable approximation given base-frame storage decouples them
+through the recursion). Eq.~\eqref{eq:wo_cov} lower-bounds $\Sigma_{wo}$
+by the projected $\Sigma_{wb}$ -- exactly the desired physics for a
+static object observed many times from the same base. World-frame
+output is for reporting only; it is never re-ingested into the
+recursion.
+
+\bigskip
+The single-frame composition above is the cheap default; it uses only
+the current $T_{wb,k}$ and is blind to historical SLAM updates. A more
+accurate world-frame estimate that absorbs the entire pose history
+(loop closures included) is the chain smoother of \S\ref{sec:chain}.
+
+%-----------------------------------------------------------------------------
+\section{Per-track observation chain (canonical world-frame state)}
+\label{sec:chain}
+%-----------------------------------------------------------------------------
+
+The Bernoulli-EKF of \S\ref{sec:ekf} is a one-step Markov filter:
+$T^{(i)}_{k|k}$ depends on the previous posterior and the current
+measurement only. That is the right tradeoff for the per-frame
+association / existence loop, but it has a structural limitation: the
+control input $u_k$ uses only the SLAM mean $T_{wb,k}$ (and its single
+predecessor), so any retroactive change to the localization
+trajectory -- a loop closure, a bundle-adjustment refinement, an
+absolute-pose correction from a fiducial -- cannot be folded back
+into the per-track posteriors that have already absorbed the old
+$T_{wb}$ stream. The accumulated $P^{(i)}_{k|k}$ is wrong but
+unrecoverable.
+
+\paragraph{Chain definition.} For each track $i$ we additionally
+maintain an append-only \emph{observation chain}
+\begin{equation}
+   \mathcal H^{(i)}_k \;=\;
+   \Bigl\{\bigl(k_n,\;\hat T^{co,(i)}_{k_n,l},\;\hat R^{co,(i)}_{k_n,l}\bigr)
+          \;:\; n=1,\dots,N^{(i)}_k\Bigr\},
+   \label{eq:chain}
+\end{equation}
+where each entry records (a) the frame index $k_n$ at which track $i$
+was matched to a detection, (b) the camera-frame ICP pose
+$\hat T^{co,(i)}_{k_n,l}$ produced by Step~1 of \S\ref{subsec:bottleneck},
+and (c) the camera-frame ICP covariance $\hat R^{co,(i)}_{k_n,l}$.
+The chain is \emph{purely perception}: it does not store any
+localization quantity. The fixed kinematic $T_{bc}$ promotes each
+entry to base frame at zero variance (eq.~\ref{eq:meas_compose}).
+
+\paragraph{Update rules.}
+\begin{itemize}[leftmargin=2em,topsep=2pt,itemsep=0pt]
+\item \textbf{Birth} (\S\ref{sec:birth}): initialise
+      $\mathcal H^{(i_{\mathrm{new}})}_k = \{(k,\hat T^{co}_{k,l},\hat R^{co}_{k,l})\}$.
+\item \textbf{Match} (\S\ref{sec:update}, matched branch): append
+      $(k,\hat T^{co}_{k,l},\hat R^{co}_{k,l})$ to $\mathcal H^{(i)}_{k-1}$.
+\item \textbf{Miss} (\S\ref{sec:update}, miss branch): chain unchanged.
+\item \textbf{Prune} (\S\ref{sec:emit}): drop the chain.
+\end{itemize}
+Memory grows linearly with the matched-frame count of each track.
+For long-running scenes a sliding window or a marginalize-into-prior
+operation (replace the oldest $M$ entries with their fused Gaussian)
+keeps the chain bounded; for typical tabletop episodes
+$N^{(i)}_k\!\le\!10^3$ and no compression is needed.
+
+\paragraph{Post-hoc world-frame composition.}
+Given the current localization posterior over the pose history
+$p\bigl(\{T_{wb,k}\}_{k=1:K}\bigr)$ -- its Gaussian posterior in the
+filter case, the full pose-graph posterior when SLAM has loop
+closures -- the world-frame pose of track $i$ is the smoothing
+estimate
+\begin{equation}
+   \bigl(\hat T_{wo}^{(i)}, \hat\Sigma_{wo}^{(i)}\bigr)
+   \;=\; \operatorname{Smooth}\!\bigl(\mathcal H^{(i)}_k,\,T_{bc},\,
+            p(\{T_{wb,k}\}_{k=1:K})\bigr),
+   \label{eq:chain_smooth}
+\end{equation}
+which we instantiate as a weighted Karcher-mean fusion of the per-entry
+world-frame poses
+\begin{align}
+   \hat T_{wo,n}^{(i)} &\;=\; T_{wb,k_n}\,T_{bc}\,\hat T^{co,(i)}_{k_n,l},
+       \label{eq:chain_lift_T}\\
+   \hat R_{wo,n}^{(i)} &\;=\; \operatorname{Ad}\!\bigl(\hat T_{wo,n}^{(i)\,-1}\bigr)\,
+                              \Sigma_{wb,k_n}\,
+                              \operatorname{Ad}(\cdot)^{\!\top}
+                            + \operatorname{Ad}(T_{bc})\,\hat R^{co,(i)}_{k_n,l}\,
+                              \operatorname{Ad}(T_{bc})^{\!\top},
+       \label{eq:chain_lift_R}
+\end{align}
+with weights $w_n\!\propto\!\Tr(\hat R_{wo,n}^{(i)})^{-1}$ in the simplest
+information-weighted form. Iterated as a Gauss-Newton step on $\SE$
+(re-linearise the innovations $\Log\!\bigl(\hat T_{wo,\mathrm{ref}}^{-1}
+\hat T_{wo,n}\bigr)$, take the weighted mean correction, repeat until
+convergence) this is a small per-track batch problem solved in
+$O(N^{(i)}_k)$ time.
+
+\paragraph{What this buys.}
+\begin{enumerate}[leftmargin=2em,topsep=2pt,itemsep=0pt]
+\item \textbf{Loop-closure consistency.} When SLAM revises the pose
+      history (a bundle adjustment shifts $T_{wb,k_n}$ for some
+      $k_n\!\in\!\mathcal H^{(i)}_k$), the chain is unchanged.
+      Eq.~\eqref{eq:chain_smooth} immediately reflects the new pose
+      history without re-running the EKF.
+\item \textbf{Correct $\Sigma_{wb}$ correlation.} Two observations at
+      the same base pose share the same $\Sigma_{wb,k}$ (they were
+      taken from the same camera). The chain composition naturally
+      preserves that correlation through the per-entry adjoint of
+      eq.~\eqref{eq:chain_lift_R}; the EKF's one-step Markov form
+      cannot.
+\item \textbf{Compatibility with object-SLAM backends.} The chain is
+      precisely the set of factors a downstream factor-graph
+      smoother (GTSAM, iSAM2) needs: each entry is a binary factor
+      between a base-pose node and an object-landmark node. Migration
+      to a joint pose+object SLAM is a bookkeeping change, not an
+      algorithmic one.
+\end{enumerate}
+
+\paragraph{Relation to the Bernoulli-EKF.} The two representations
+co-exist. Per-frame association, Bernoulli existence updates, and
+birth / prune all read $(T^{(i)}_{k|k}, P^{(i)}_{k|k})$ from the
+EKF (the \emph{fast tier}); world-frame consumers and SLAM-aware
+queries read $(\hat T_{wo}^{(i)}, \hat\Sigma_{wo}^{(i)})$ from the
+chain (the \emph{canonical world-frame state}). When a SLAM update
+lands, the chain composition is recomputed and the result can
+optionally be projected back to base frame
+($T_{bo}^{(i)} = T_{wb,k}^{-1}\hat T_{wo}^{(i)}$) and \emph{injected}
+into the EKF as a re-initialisation; this is the periodic
+reconciliation pattern already used by the slow tier in the
+existing implementation.
 
 %-----------------------------------------------------------------------------
 \section{Frame-by-frame algorithm}
 %-----------------------------------------------------------------------------
 
 \begin{enumerate}[leftmargin=2em]
-   \item \textbf{Predict.} For each $i\in\mathcal I_{k-1}$: state via \eqref{eq:ekf_T_pred}--\eqref{eq:ekf_P_pred}; existence via \eqref{eq:bern_pred_r}.
-   \item \textbf{Measure.} For every mask $m_{k,l}$ back-project to a world-frame point cloud $\mathcal C_{k,l}$. For each candidate track $i$ passing a coarse gate, run colored ICP to obtain $(\hat T_{k,l}^{(i)},\hat R_{k,l}^{(i)})$; compute $d^2_{il}$ via \eqref{eq:innov_pair} and $C_{il}$ via \eqref{eq:cost}.
+   \item \textbf{Predict.} For each $i\in\mathcal I_{k-1}$: pick $u^{(i)}_k$ per eq.~\eqref{eq:control} ($\Delta T_{bg,k}$ for manipulation set, $\Delta T_{wb,k}^{-1}$ otherwise); apply state predict via \eqref{eq:ekf_T_pred}--\eqref{eq:ekf_P_pred}; advance existence via \eqref{eq:bern_pred_r}.
+   \item \textbf{Measure.} For every mask $m_{k,l}$ back-project to a \emph{camera-frame} point cloud $\mathcal C_{k,l}$. For each candidate track $i$ passing a coarse gate, run colored ICP against $\mathcal G^{(i)}_{k-1}$ to obtain $(\hat T^{co}_{k,l},\hat R^{co}_{k,l})$, then promote to base via \eqref{eq:meas_compose}: $\hat T_{k,l}=T_{bc}\hat T^{co}_{k,l}$, $\hat R_{k,l}=\operatorname{Ad}(T_{bc})\hat R^{co}_{k,l}\operatorname{Ad}(T_{bc})^{\!\top}$. Compute $d^2_{il}$ via \eqref{eq:innov_pair} and $C_{il}$ via \eqref{eq:cost}.
    \item \textbf{Associate.} Solve \eqref{eq:hung} for $\pi^{\!*}$.
    \item \textbf{Update each track $i$.}
          \begin{itemize}[topsep=0pt]
-            \item if $\pi^{\!*}(i)=l$ and $w_{il}\!>\!0$: apply \eqref{eq:r_assoc} and EKF \eqref{eq:ekf_T_upd}--\eqref{eq:ekf_P_upd} with $R_{il}/w_{il}$; set $\tau^{(i)}_k\!\leftarrow\!\tau_{k,l}$;
-            \item else: compute $p_v^{(i)}$ via \eqref{eq:pv} and apply \eqref{eq:r_miss} (leaving $\tau^{(i)}_k\!=\!\tau^{(i)}_{k-1}$).
+            \item if $\pi^{\!*}(i)=l$ and $w_{il}\!>\!0$: apply \eqref{eq:r_assoc} and EKF \eqref{eq:ekf_T_upd}--\eqref{eq:ekf_P_upd} with $R_{il}/w_{il}$; set $\tau^{(i)}_k\!\leftarrow\!\tau_{k,l}$; \emph{append} $(k,\hat T^{co}_{k,l},\hat R^{co}_{k,l})$ to the observation chain $\mathcal H^{(i)}_{k-1}$ (\S\ref{sec:chain});
+            \item else: compute $p_v^{(i)}$ via \eqref{eq:pv} and apply \eqref{eq:r_miss} (leaving $\tau^{(i)}_k\!=\!\tau^{(i)}_{k-1}$ and $\mathcal H^{(i)}$ unchanged).
          \end{itemize}
-   \item \textbf{Birth.} For each unassigned mask: centroid-initialised $\hat T$ and inflated $\hat R$, then \eqref{eq:birth_r}, \eqref{eq:birth_state}, and $\tau^{(i_{\mathrm{new}})}_k\!\leftarrow\!\tau_{k,l}$.
+   \item \textbf{Birth.} For each unassigned mask: centroid-initialised $\hat T$ and inflated $\hat R$, then \eqref{eq:birth_r}, \eqref{eq:birth_state}, $\tau^{(i_{\mathrm{new}})}_k\!\leftarrow\!\tau_{k,l}$, and $\mathcal H^{(i_{\mathrm{new}})}_k\!=\!\{(k,\hat T^{co}_{k,l},\hat R^{co}_{k,l})\}$.
    \item \textbf{Prune.} Drop $i$ with $r^{(i)}_{k|k}<r_{\min}$.
-   \item \textbf{Emit.} Report $\widehat{\mathcal X}_k$.
+   \item \textbf{Emit.} Report base-frame $\widehat{\mathcal X}_k$ via \eqref{eq:emit_base}; world-frame consumers compose with $T_{wb,k},\Sigma_{wb,k}$ via \eqref{eq:wo_mean}--\eqref{eq:wo_cov}.
 \end{enumerate}
 
 %-----------------------------------------------------------------------------
@@ -677,8 +1067,13 @@ The output at frame $k$ is the labelled MAP estimate
    \item \eqref{eq:r_miss} replaces the integer \texttt{miss\_streak};
          pruning at $r_{\min}$ replaces the M-of-N deletion test.
    \item $p_v^{(i)}$ via \eqref{eq:pv} adds a new \texttt{visibility.py}
-         module ($\sim$60 LOC, depends only on $T_{cw,k}$ and the
-         per-object shape summaries).
+         module ($\sim$60 LOC, depends only on the fixed $T_{bc}$ and
+         the per-object shape summaries -- no SLAM input).
+   \item Base-frame storage of $T^{(i)}, P^{(i)}$ aligns with the
+         existing \texttt{pose\_update.gaussian\_state.GaussianState}
+         convention; world-frame composition lives in
+         \texttt{collapsed\_object\_world}. The RBPF Bernoulli path is
+         being migrated to base-frame storage to match.
 \end{itemize}
 
 \paragraph{Calibrated parameters.} The recursion is parameterised by

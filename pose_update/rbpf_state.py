@@ -32,6 +32,15 @@ import numpy as np
 from pose_update.ekf_se3 import (
     se3_exp, se3_log, se3_adjoint, ekf_predict, saturate_covariance,
 )
+from pose_update.object_belief import (
+    LOG_EPS,
+    floor_diag as _floor_diag,
+    lift_measurement_world,
+    predict_ad_conjugate,
+    innovation_from_belief,
+    joseph_update,
+    merge_info_sum,
+)
 from pose_update.slam_interface import (
     PoseEstimate, ParticlePose,
     sample_particles_from_gaussian, as_gaussian,
@@ -93,11 +102,52 @@ class RBPFState:
     # Numerical floor for a log-weight (avoids -inf / NaN).
     _LOG_EPS = -1e18
 
-    def __init__(self, n_particles: int, rng: Optional[np.random.Generator] = None):
+    def __init__(self,
+                 n_particles: int,
+                 rng: Optional[np.random.Generator] = None,
+                 T_bc: Optional[np.ndarray] = None,
+                 P_min_diag: Optional[np.ndarray] = None):
         assert n_particles >= 1
         self.n_particles = n_particles
         self.particles: List[Particle] = []
         self._rng = rng if rng is not None else np.random.default_rng()
+
+        # Per-frame camera extrinsic. Previously ignored by RBPFState
+        # (implicit T_bc=I), which silently aliased head pan/tilt as
+        # object motion. Now installed via `set_camera_extrinsic(...)`
+        # at the top of every SceneTracker step, same semantics as the
+        # Gaussian backend.
+        self.T_bc: np.ndarray = (
+            np.eye(4, dtype=np.float64) if T_bc is None
+            else np.asarray(T_bc, dtype=np.float64).copy())
+        self._Ad_bc: np.ndarray = se3_adjoint(self.T_bc)
+
+        # Collapsed base-pose view (mean over particles). Updated in
+        # `ingest_slam` so downstream code can treat the RBPF and the
+        # Gaussian backends uniformly.
+        self.T_wb: Optional[np.ndarray] = None
+        self.prev_T_wb: Optional[np.ndarray] = None
+        self.Sigma_wb: Optional[np.ndarray] = None
+
+        # Per-axis covariance floor. Matches GaussianState semantics.
+        self.P_min_diag: Optional[np.ndarray] = (
+            np.asarray(P_min_diag, dtype=np.float64).reshape(6).copy()
+            if P_min_diag is not None else None)
+
+    # ------------------------------------------------------------------ #
+    #  Camera extrinsic (per-frame)
+    # ------------------------------------------------------------------ #
+
+    def set_camera_extrinsic(self, T_bc: np.ndarray) -> None:
+        """Install `T_bc(t_k)` for THIS frame. Must be called at the top
+        of every step before any measurement-side operation. Matches
+        `GaussianState.set_camera_extrinsic` semantics -- see the
+        docstring there for rationale."""
+        T_bc = np.asarray(T_bc, dtype=np.float64)
+        if T_bc.shape != (4, 4):
+            raise ValueError(f"T_bc must be (4, 4), got {T_bc.shape}")
+        self.T_bc = T_bc.copy()
+        self._Ad_bc = se3_adjoint(self.T_bc)
 
     # --------------------------------------------------------------- #
     #  Convenience / inspection
@@ -169,6 +219,8 @@ class RBPFState:
                 )
                 for k in range(self.n_particles)
             ]
+            # Initialise collapsed base view for BasePoseBackend protocol.
+            self._refresh_collapsed_base()
             return
 
         for k, p in enumerate(self.particles):
@@ -178,6 +230,27 @@ class RBPFState:
             p.prev_T_wb = p.T_wb
             p.T_wb = new_Ts[k].copy()
             p.log_weight += float(new_log_increments[k])
+
+        # Refresh the collapsed (T_wb, prev_T_wb) view that the
+        # BasePoseBackend protocol exposes.
+        self._refresh_collapsed_base()
+
+    def _refresh_collapsed_base(self) -> None:
+        """Populate self.T_wb / self.prev_T_wb / self.Sigma_wb from the
+        current particle cloud. Called at the end of `ingest_slam` so
+        downstream protocol callers can treat the RBPF and Gaussian
+        backends uniformly.
+        """
+        if not self.particles:
+            self.T_wb = None
+            self.prev_T_wb = None
+            self.Sigma_wb = None
+            return
+        prev = self.T_wb
+        self.prev_T_wb = prev.copy() if prev is not None else None
+        base_pe = self.collapsed_base()
+        self.T_wb = base_pe.T.copy()
+        self.Sigma_wb = base_pe.cov.copy()
 
     # --------------------------------------------------------------- #
     #  Object initialization
@@ -189,21 +262,35 @@ class RBPFState:
                       init_cov: np.ndarray) -> bool:
         """Create an entry for `oid` in each particle that lacks one.
 
-        The world-frame init is per-particle: μ^k_o = T_wb^k · T_co_meas.
-        Particles disagree — that is the point; the mixture will reflect the
-        base-pose uncertainty.
+        The world-frame mean is per-particle:
+            μ^k_o = T_wb^k · T_bc · T_co_meas
+        `init_cov` is treated as an already-in-storage-frame (world-
+        frame tangent) prior, not as camera-frame measurement noise --
+        same convention as `GaussianState.ensure_object` (see the
+        docstring there for why Ad-lifting a loose rotation prior
+        through `Ad(T_wb^k T_bc)` lever-arms into an impractical
+        translation variance for Fetch-style `|t_bc| ~ 1 m`).
 
-        Returns True if a new object entry was added in at least one particle
-        (i.e., this is a newly-seen object), else False.
+        Σ_wb is NOT added to `init_cov`: per-particle conditional has
+        Σ_wb = 0 by Rao-Blackwellization; the spread across particles
+        captures the full SLAM uncertainty at collapse time.
+
+        Returns True if a new object entry was added in at least one
+        particle, else False.
         """
+        T_co_meas = np.asarray(T_co_meas, dtype=np.float64)
+        T_bc = self.T_bc
+        init_cov_sym = 0.5 * (init_cov + init_cov.T)
+        if self.P_min_diag is not None:
+            init_cov_sym = _floor_diag(init_cov_sym, self.P_min_diag)
         newly_added = False
         for p in self.particles:
             if oid in p.objects:
                 continue
-            T_wo = p.T_wb @ T_co_meas
+            T_wo = p.T_wb @ T_bc @ T_co_meas
             p.objects[oid] = ParticleObjectBelief(
                 mu=T_wo.copy(),
-                cov=init_cov.copy(),
+                cov=init_cov_sym.copy(),
             )
             newly_added = True
         return newly_added
@@ -309,58 +396,128 @@ class RBPFState:
                 posterior (bernoulli_ekf.tex eq. eq:phi). Default None =
                 no cap, matching pre-Bernoulli behaviour.
         """
-        R_sym = 0.5 * (R_icp + R_icp.T)
-        if huber_w > 0.0 and huber_w < 1.0:
-            R_sym = R_sym / huber_w
-        I6 = np.eye(6)
-        two_pi_log = 6.0 * np.log(2.0 * np.pi)
-
+        T_co_meas = np.asarray(T_co_meas, dtype=np.float64)
+        T_bc = self.T_bc
         for p in self.particles:
             belief = p.objects.get(oid)
             if belief is None:
                 continue
+            # Per-particle world-frame lift: Σ_wb is zero conditional on
+            # this particle's sampled T_wb^k (Rao-Blackwellization).
+            T_wo_meas, R_wo = lift_measurement_world(
+                T_co_meas, R_icp, T_bc, p.T_wb, Sigma_wb=None)
 
-            # S and K are constant during IEKF (they depend only on the
-            # prior covariance, which is not updated until after the loop).
-            S = belief.cov + R_sym
-            K = np.linalg.solve(S.T, belief.cov.T).T  # Σ · S⁻¹
+            # Innovation at the prior mean (for the particle-reweighting
+            # likelihood) BEFORE the IEKF mutates μ.
+            _, _, _, log_lik = innovation_from_belief(
+                belief.mu, belief.cov, T_wo_meas, R_wo)
 
-            T_wo_meas = p.T_wb @ T_co_meas
-            mu_lin = belief.mu.copy()
-            delta0 = None  # innovation at the prior mean — for likelihood
+            # IEKF + Joseph posterior.
+            mu_new, cov_new = joseph_update(
+                belief.mu, belief.cov, T_wo_meas, R_wo,
+                iekf_iters=iekf_iters, huber_w=huber_w,
+                P_max=P_max, P_min_diag=self.P_min_diag)
+            belief.mu = mu_new
+            belief.cov = cov_new
 
-            for i in range(max(1, iekf_iters)):
-                delta = se3_log(np.linalg.inv(mu_lin) @ T_wo_meas)
-                if i == 0:
-                    delta0 = delta
-                mu_lin = belief.mu @ se3_exp(K @ delta)
+            # Vision's dual role: the same log-likelihood that updated
+            # the object EKF also reweights this particle's trajectory
+            # posterior.
+            p.log_weight += log_lik
 
-            # Likelihood at the prior-mean innovation (standard Kalman form).
-            sign, logdet = np.linalg.slogdet(S)
-            if sign <= 0 or not np.isfinite(logdet):
-                log_lik = self._LOG_EPS
-            else:
-                try:
-                    Sinv_delta = np.linalg.solve(S, delta0)
-                    log_lik = (-0.5 * float(delta0 @ Sinv_delta)
-                               - 0.5 * (float(logdet) + two_pi_log))
-                except np.linalg.LinAlgError:
-                    log_lik = self._LOG_EPS
+    def update_observation_centroid(self,
+                                     oid: int,
+                                     centroid_cam: np.ndarray,
+                                     R_cam: Optional[np.ndarray] = None,
+                                     huber_w: float = 1.0,
+                                     P_max: Optional[np.ndarray] = None
+                                     ) -> None:
+        """Translation-only per-particle Kalman update from a camera-frame
+        centroid (3-DoF fallback for when fine ICP fails).
 
-            # Joseph-form covariance update (bernoulli_ekf.tex eq. eq:ekf_P_upd):
-            #     P_{k|k} = (I - K) P_{k|k-1} (I - K)^T + K R K^T
-            # Equivalent to (I-K)P under exact arithmetic, but PSD-preserving
-            # under rounding error when K drifts from optimal (e.g., with
-            # Huber re-weighting R <- R/w). We then optionally apply Phi.
-            I_K = I6 - K
-            cov_post = I_K @ belief.cov @ I_K.T + K @ R_sym @ K.T
+        For particle k:
+            t_wc          = T_wb^k · T_bc · [centroid_cam; 1]   (world-frame position meas)
+            R_wo_tt       = R_wc · R_cam · R_wc^T   (with R_wc = (T_wb^k·T_bc)[:3,:3])
+            ν_t^k         = t_wc - μ_wo^k[:3, 3]
+            S^k           = P^k[:3, :3] + R_wo_tt / w
+            K_full^k      = P^k[:, :3] · S^k^{-1}   (6×3; includes rotation gain
+                              induced by translation-rotation cross-terms in P)
+            μ_wo^k        ← μ_wo^k ⊞ [K_full^k @ ν_t^k]
+            P^k           ← Joseph update with H = [I_3 | 0_3×3]
+            p.log_weight += log_lik_3D
+
+        Parallel to `update_observation` but operates on the 3×3 translation
+        partition only; measurement rotation is unobserved. Mirrors
+        `GaussianState.update_observation_centroid`.
+        """
+        if huber_w <= 0.0:
+            return
+        centroid_cam = np.asarray(centroid_cam, dtype=np.float64).reshape(3)
+        if R_cam is None:
+            R_cam = np.diag([(0.02) ** 2] * 3)
+        R_cam = 0.5 * (np.asarray(R_cam, dtype=np.float64)
+                         + np.asarray(R_cam, dtype=np.float64).T)
+        if 0.0 < huber_w < 1.0:
+            R_cam_eff = R_cam / huber_w
+        else:
+            R_cam_eff = R_cam
+
+        T_bc = self.T_bc
+        for p in self.particles:
+            belief = p.objects.get(oid)
+            if belief is None:
+                continue
+            T_wc = p.T_wb @ T_bc
+            R_wc = T_wc[:3, :3]
+            t_wo_meas = (T_wc @ np.array([centroid_cam[0], centroid_cam[1],
+                                             centroid_cam[2], 1.0]))[:3]
+            R_wo_tt = R_wc @ R_cam_eff @ R_wc.T
+            R_wo_tt = 0.5 * (R_wo_tt + R_wo_tt.T)
+
+            cov = 0.5 * (belief.cov + belief.cov.T)
+            P_col = cov[:, :3]                     # (6,3)
+            P_tt = cov[:3, :3]                     # (3,3)
+            S = P_tt + R_wo_tt
+            S = 0.5 * (S + S.T)
+
+            try:
+                K_full = np.linalg.solve(S.T, P_col.T).T   # (6,3)
+                sign, logdet = np.linalg.slogdet(S)
+            except np.linalg.LinAlgError:
+                continue
+
+            nu_t = t_wo_meas - np.asarray(belief.mu[:3, 3], dtype=np.float64)
+            corr = np.zeros(6, dtype=np.float64)
+            corr[:3] = K_full[:3] @ nu_t
+            corr[3:] = K_full[3:] @ nu_t
+            mu_new = belief.mu @ se3_exp(corr)
+
+            # Joseph covariance update; H selects translation partition.
+            I6 = np.eye(6)
+            IKH = I6.copy()
+            IKH[:, :3] = IKH[:, :3] - K_full
+            cov_post = IKH @ cov @ IKH.T + K_full @ R_wo_tt @ K_full.T
             cov_post = 0.5 * (cov_post + cov_post.T)
             if P_max is not None:
-                cov_post = saturate_covariance(cov_post, P_max)
-            belief.mu = mu_lin
+                cov_post = np.minimum(cov_post, P_max)  # simple cap
+            if self.P_min_diag is not None:
+                d = np.asarray(self.P_min_diag, dtype=np.float64)
+                idx = np.arange(6)
+                cov_post[idx, idx] = np.maximum(cov_post[idx, idx], d)
+
+            belief.mu = mu_new
             belief.cov = cov_post
 
-            p.log_weight += log_lik
+            # Particle log-likelihood from the 3-DoF innovation (against the
+            # PRIOR state, computed just above via P_tt + R_wo_tt and the
+            # same nu_t).
+            if sign > 0 and np.isfinite(logdet):
+                try:
+                    d2 = float(nu_t @ np.linalg.solve(S, nu_t))
+                    two_pi_log = 3.0 * np.log(2.0 * np.pi)
+                    p.log_weight += -0.5 * d2 - 0.5 * (float(logdet) + two_pi_log)
+                except np.linalg.LinAlgError:
+                    pass
 
     # --------------------------------------------------------------- #
     #  Innovation statistics for data association
@@ -385,34 +542,16 @@ class RBPFState:
         collapsed = self.collapsed_object(oid)
         if collapsed is None:
             return None
-        T_prior = collapsed.T
-        cov_prior = collapsed.cov
-
-        # The measurement T_co is camera-frame; we project it to world frame
-        # using the collapsed base pose (mean of the particle cloud). This
-        # is the per-formulation single-Gaussian approximation used in data
-        # association; per-particle updates remain mixture-exact.
+        # Project camera-frame measurement to world frame via the
+        # collapsed base pose + current camera extrinsic. This is the
+        # single-Gaussian approximation used for the Hungarian cost
+        # matrix; per-particle updates (in `update_observation`) remain
+        # mixture-exact.
         base_pe = self.collapsed_base()
-        T_wo_meas = base_pe.T @ T_co_meas
-
-        nu = se3_log(np.linalg.inv(T_prior) @ T_wo_meas)
-        R_sym = 0.5 * (R_icp + R_icp.T)
-        S = cov_prior + R_sym
-        S = 0.5 * (S + S.T)
-
-        sign, logdet = np.linalg.slogdet(S)
-        try:
-            Sinv_nu = np.linalg.solve(S, nu)
-            d2 = float(nu @ Sinv_nu)
-        except np.linalg.LinAlgError:
-            d2 = float("inf")
-            Sinv_nu = None
-        if sign <= 0 or not np.isfinite(logdet) or not np.isfinite(d2):
-            log_lik = self._LOG_EPS
-        else:
-            two_pi_log = 6.0 * np.log(2.0 * np.pi)
-            log_lik = -0.5 * d2 - 0.5 * (float(logdet) + two_pi_log)
-        return nu, S, d2, log_lik
+        T_wo_meas, R_wo = lift_measurement_world(
+            T_co_meas, R_icp, self.T_bc, base_pe.T, Sigma_wb=None)
+        return innovation_from_belief(
+            collapsed.T, collapsed.cov, T_wo_meas, R_wo)
 
     # --------------------------------------------------------------- #
     #  Object deletion
@@ -470,6 +609,146 @@ class RBPFState:
             new_particles.append(clone)
         self.particles = new_particles
         return True
+
+    # --------------------------------------------------------------- #
+    #  Centroid-only innovation (Phase C)
+    # --------------------------------------------------------------- #
+
+    def centroid_innovation_stats(self,
+                                   oid: int,
+                                   centroid_cam: np.ndarray,
+                                   R_cam: Optional[np.ndarray] = None,
+                                   ) -> Optional[tuple]:
+        """3-DOF centroid innovation at the collapsed (weighted-mean)
+        posterior. Mirrors `GaussianState.centroid_innovation_stats`.
+
+        Lift:
+            t_wo_meas = T_wb · T_bc · [centroid_cam; 1]
+            R_wo_tt   = R_tt(T_wb T_bc) · R_cam · R_tt(·)^T
+        Innovation and d^2 computed in the world-frame translation
+        tangent at the collapsed μ_wo. Σ_wb is NOT added (matches the
+        6D `innovation_stats` in this class: the single-Gaussian
+        Hungarian approximation, not the per-particle conditional).
+        """
+        collapsed = self.collapsed_object(oid)
+        if collapsed is None:
+            return None
+        centroid_cam = np.asarray(centroid_cam, dtype=np.float64).reshape(3)
+        T_wc = self.collapsed_T_wb() @ self.T_bc
+        t_wo_meas = (T_wc @ np.array([centroid_cam[0],
+                                        centroid_cam[1],
+                                        centroid_cam[2], 1.0]))[:3]
+        t_wo_prior = np.asarray(collapsed.T[:3, 3], dtype=np.float64)
+        nu = t_wo_meas - t_wo_prior
+
+        if R_cam is None:
+            R_cam = np.diag([(0.02) ** 2] * 3)
+        else:
+            R_cam = 0.5 * (np.asarray(R_cam, dtype=np.float64)
+                            + np.asarray(R_cam, dtype=np.float64).T)
+
+        R_wc = T_wc[:3, :3]
+        R_wo_tt = R_wc @ R_cam @ R_wc.T
+        P_tt = np.asarray(collapsed.cov[:3, :3], dtype=np.float64)
+        S = P_tt + R_wo_tt
+        S = 0.5 * (S + S.T)
+        sign, logdet = np.linalg.slogdet(S)
+        try:
+            Sinv_nu = np.linalg.solve(S, nu)
+            d2 = float(nu @ Sinv_nu)
+        except np.linalg.LinAlgError:
+            d2 = float("inf")
+        if sign <= 0 or not np.isfinite(logdet) or not np.isfinite(d2):
+            log_lik = LOG_EPS
+        else:
+            two_pi_log = 3.0 * np.log(2.0 * np.pi)
+            log_lik = -0.5 * d2 - 0.5 * (float(logdet) + two_pi_log)
+        return nu, S, d2, log_lik
+
+    # --------------------------------------------------------------- #
+    #  BasePoseBackend protocol (structural)
+    # --------------------------------------------------------------- #
+
+    def collapsed_T_wb(self) -> np.ndarray:
+        """Current weighted-mean base pose (BasePoseBackend)."""
+        return self.collapsed_base().T
+
+    def known_oids(self) -> List[int]:
+        """Union of oids across all particles (BasePoseBackend)."""
+        oids: set = set()
+        for p in self.particles:
+            oids.update(p.objects.keys())
+        return sorted(oids)
+
+    def camera_frame_prior(self,
+                            oid: int) -> Optional[np.ndarray]:
+        """T_co^pred = (T_wb · T_bc)^{-1} · collapsed μ_wo (BasePoseBackend).
+
+        Used to seed ICP before Hungarian. Uses the collapsed (weighted-mean)
+        base pose and object mean, which is the standard single-Gaussian
+        approximation used for data association; per-particle updates
+        remain mixture-exact."""
+        collapsed = self.collapsed_object(oid)
+        if collapsed is None:
+            return None
+        T_wc = self.collapsed_T_wb() @ self.T_bc
+        return np.linalg.inv(T_wc) @ collapsed.T
+
+    def predict_static_all(self,
+                            Q_fn: Callable[[int], np.ndarray],
+                            skip_oids: Optional[set] = None,
+                            P_max: Optional[np.ndarray] = None) -> None:
+        """Static-object predict for every oid not in `skip_oids`
+        (BasePoseBackend).
+
+        World-frame storage: μ unchanged, Σ inflates by Q_fn(oid) per
+        particle. Held tracks (in `skip_oids`) get Q=0 so the caller's
+        `rigid_attachment_predict` is the only source of inflation for them.
+        """
+        skip = skip_oids or set()
+        def _Q(oid: int, _p: Particle) -> np.ndarray:
+            if oid in skip:
+                return np.zeros((6, 6), dtype=np.float64)
+            return Q_fn(oid)
+        self.predict_objects(_Q, P_max=P_max)
+
+    def collapsed_object_base(self, oid: int) -> Optional[PoseEstimate]:
+        """Collapsed object posterior projected back into base frame
+        (BasePoseBackend).
+
+            μ_bo = T_wb^{-1} · μ_wo
+            Σ_bo = Σ_wo (approximation; the mixture spread already
+                    absorbed Σ_wb via the particle cloud).
+        """
+        pe = self.collapsed_object(oid)
+        if pe is None:
+            return None
+        T_wb = self.collapsed_T_wb()
+        T_wb_inv = np.linalg.inv(T_wb)
+        mu_bo = T_wb_inv @ pe.T
+        return PoseEstimate(T=mu_bo, cov=pe.cov.copy())
+
+    def merge_tracks(self, oid_keep: int, oid_drop: int) -> bool:
+        """Per-particle Bayesian information fusion of two tracks
+        (BasePoseBackend). Each particle's (μ_keep, Σ_keep) is merged
+        with (μ_drop, Σ_drop); the drop oid is then removed."""
+        if oid_keep == oid_drop:
+            return False
+        any_merged = False
+        for p in self.particles:
+            a = p.objects.get(oid_keep)
+            b = p.objects.get(oid_drop)
+            if a is None or b is None:
+                continue
+            try:
+                mu_new, cov_new = merge_info_sum(a.mu, a.cov, b.mu, b.cov)
+            except np.linalg.LinAlgError:
+                continue
+            a.mu = mu_new
+            a.cov = _floor_diag(cov_new, self.P_min_diag)
+            del p.objects[oid_drop]
+            any_merged = True
+        return any_merged
 
     # --------------------------------------------------------------- #
     #  Collapsing to single-Gaussian summaries (for legacy consumers)

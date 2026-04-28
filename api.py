@@ -262,16 +262,24 @@ class ObjectTracker:
     Consumer: robi_butler's SceneManager.
     """
 
-    def __init__(self, K: np.ndarray, voxel_size: float = 0.002):
+    def __init__(self, K: np.ndarray, voxel_size: float = 0.002,
+                 gripper: Optional[Any] = None):
         """
         Args:
             K: (3, 3) camera intrinsic matrix.
             voxel_size: TSDF voxel size for new objects.
+            gripper: optional `GripperGeometry` instance (e.g.
+                ``create_gripper_geometry("fetch")``). When provided,
+                `detect_held_object` uses the gripper's URDF-derived
+                inside-jaws volume for grasp containment instead of an
+                ad-hoc EE-centered box. None preserves the legacy
+                `box_size` behaviour for backwards compatibility.
         """
         self._K = K.copy()
         self._voxel_size = voxel_size
         self._objects: List[Any] = []  # internal SceneObject list
         self._frame_count = 0
+        self._gripper = gripper
 
     def update(self, detections: FrameDetections,
                rgb: np.ndarray, depth: np.ndarray,
@@ -361,23 +369,54 @@ class ObjectTracker:
                 obj.T_oe = None  # clear EE-object offset
 
     def detect_held_object(self, T_ew: np.ndarray,
-                           box_size: Tuple = (0.07, 0.05, 0.05)) -> Optional[int]:
+                           box_size: Tuple = (0.07, 0.05, 0.05),
+                           joint_state: Optional[Dict[str, Any]] = None,
+                           ) -> Optional[int]:
         """Detect which object (if any) is inside the end-effector grasp box.
 
+        Two paths share this method:
+
+          * **URDF-derived (preferred)** — when the tracker was built
+            with a `gripper` (a `GripperGeometry` subclass) AND the
+            caller passes the current `joint_state` dict
+            (e.g. ``{"l_gripper_finger_joint": 0.012, ...}``),
+            the inside-jaws AABB is taken from
+            ``self._gripper.inside_volume_g(state)``. The box lives in
+            the gripper-link frame; ``T_ew`` is treated as that link's
+            world pose.
+          * **Legacy** — falls back to an EE-centered box of
+            half-extents ``box_size / 2``. Used when no gripper /
+            joint_state is supplied.
+
         Args:
-            T_ew: (4, 4) end-effector to world transform.
-            box_size: (length, width, height) of the grasp detection box in meters.
+            T_ew: (4, 4) gripper-link (or end-effector) to world transform.
+            box_size: legacy fallback box size.
+            joint_state: per-frame joint dict; consumed by the gripper's
+                ``state_from_joints`` if a gripper is configured.
 
         Returns:
             Object ID of the held object, or None.
         """
+        ee_axes = T_ew[:3, :3]
         ee_center = T_ew[:3, 3]
-        half = np.array(box_size) / 2.0
-        ee_axes = T_ew[:3, :3]  # columns are x, y, z axes
+
+        # Pick the test volume + its frame mapping.
+        #   `mins, maxs` are AABB bounds in the gripper/EE-local frame.
+        if self._gripper is not None and joint_state is not None:
+            state = self._gripper.state_from_joints(joint_state)
+            if state is not None:
+                box = self._gripper.inside_volume_g(state)
+                mins, maxs = box.mins.copy(), box.maxs.copy()
+            else:
+                # joint_state malformed; fall back to EE-centered box.
+                half = 0.5 * np.asarray(box_size, dtype=np.float64)
+                mins, maxs = -half, +half
+        else:
+            half = 0.5 * np.asarray(box_size, dtype=np.float64)
+            mins, maxs = -half, +half
 
         best_id = None
         best_count = 0
-
         for obj in self._objects:
             if not hasattr(obj, '_points') or len(obj._points) == 0:
                 continue
@@ -391,9 +430,9 @@ class ObjectTracker:
             except Exception:
                 continue
 
-            # Project into EE local frame
-            local_pts = (world_pts - ee_center) @ ee_axes  # (N, 3)
-            in_box = np.all(np.abs(local_pts) <= half, axis=1)
+            # Express in gripper-link / EE-local frame and AABB-test.
+            local_pts = (world_pts - ee_center) @ ee_axes
+            in_box = np.all((local_pts >= mins) & (local_pts <= maxs), axis=1)
             count = int(np.sum(in_box))
             if count > best_count:
                 best_count = count

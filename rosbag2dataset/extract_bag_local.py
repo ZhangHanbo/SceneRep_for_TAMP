@@ -3,8 +3,8 @@
 """Cross-platform bag extractor — no ROS install required.
 
 Produces the same directory layout the ROS-native ``rosbag2dataset_5hz.py``
-writes, minus the TF-composed world-frame camera/gripper poses (those need
-a full TF tree walk which we don't attempt on macOS).
+writes, plus the per-frame base-to-camera-optical extrinsic composed from
+/tf + /tf_static.
 
     <out>/
       rgb/rgb_NNNNNN.png                 (CompressedImage decoded to PNG)
@@ -15,10 +15,25 @@ a full TF tree walk which we don't attempt on macOS).
       pose_txt/amcl_pose.txt             (idx x y z qx qy qz qw — map frame)
       pose_txt/amcl_pose_cov.txt         (idx + 36-float covariance row-major)
       pose_txt/joints_pose.json          (frame_idx → {joint_name: position})
+      pose_txt/T_bc.txt                  (idx x y z qx qy qz qw — base ← cam_optical)
+      pose_txt/tf_static.json            (frozen /tf_static edges, debug aid)
 
 Frame timing: we snap to a target rate (default 5 Hz, matching the ROS script)
 by keeping the latest cached value of every topic and emitting one composite
 frame each time the sampling clock ticks.
+
+T_bc.txt is the base_link -> head_camera_rgb_optical_frame transform at
+each emit time, composed from the latest cached /tf transforms along the
+chain `base_link -> torso_lift_link -> head_pan_link -> head_tilt_link
+-> head_camera_link -> head_camera_rgb_frame -> head_camera_rgb_optical_frame`.
+The pipeline reads this file and feeds it per-frame into the EKF tracker
+so head pan/tilt/torso-lift motion is correctly attributed to the camera,
+not to objects.
+
+joints_pose.json: each frame's value is the *accumulated* joint state from
+all /joint_states messages observed up to that frame (Fetch publishes
+gripper joints on a separate /joint_states publisher from the main one;
+naively keeping only the last message would lose the head joints).
 
 Usage:
     python rosbag2dataset/extract_bag_local.py <bag.bag> <out_dir> [--hz 5]
@@ -33,14 +48,32 @@ import math
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
+from scipy.spatial.transform import Rotation as R_
 
 # rosbags (pip install rosbags) — no ROS needed.
 from rosbags.highlevel import AnyReader
 from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Kinematic chain composed at extraction time (Fetch base -> camera optical)
+# ---------------------------------------------------------------------------
+
+# Edges traversed in order. Sourced from /tf for the dynamic ones (torso,
+# head pan/tilt) and /tf_static for the rigid ones (camera mount, RGB
+# offset, optical convention).
+BASE_TO_OPTICAL_CHAIN: Tuple[Tuple[str, str], ...] = (
+    ("base_link", "torso_lift_link"),
+    ("torso_lift_link", "head_pan_link"),
+    ("head_pan_link", "head_tilt_link"),
+    ("head_tilt_link", "head_camera_link"),
+    ("head_camera_link", "head_camera_rgb_frame"),
+    ("head_camera_rgb_frame", "head_camera_rgb_optical_frame"),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -53,10 +86,34 @@ def _norm_type(t: str) -> str:
 
 
 def _quat_to_yaw(x: float, y: float, z: float, w: float) -> float:
-    """yaw (z-axis) from a quaternion (x, y, z, w)."""
-    siny_cosp = 2.0 * (w * z + x * y)
-    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
-    return math.atan2(siny_cosp, cosy_cosp)
+    """yaw (z-axis) from a (x, y, z, w) quaternion via scipy."""
+    return float(R_.from_quat([x, y, z, w]).as_euler("xyz")[2])
+
+
+def _tf_msg_to_T(tr) -> np.ndarray:
+    """geometry_msgs/TransformStamped.transform -> 4x4 SE(3)."""
+    t = tr.transform.translation
+    q = tr.transform.rotation
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = R_.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+    T[:3, 3] = (t.x, t.y, t.z)
+    return T
+
+
+def _compose_chain(edges: Dict[Tuple[str, str], np.ndarray]
+                    ) -> Optional[np.ndarray]:
+    """Walk BASE_TO_OPTICAL_CHAIN through the cached edge dict.
+
+    Returns the composed SE(3) (4x4) or None if any edge is missing
+    (the chain isn't complete yet -- /tf hasn't published all edges).
+    """
+    T = np.eye(4, dtype=np.float64)
+    for edge in BASE_TO_OPTICAL_CHAIN:
+        E = edges.get(edge)
+        if E is None:
+            return None
+        T = T @ E
+    return T
 
 
 def _decode_compressed_image(msg) -> np.ndarray:
@@ -149,11 +206,24 @@ def extract(bag_path: str, out_dir: str, hz: float = 5.0) -> None:
     amcl_cov_path     = os.path.join(pose_dir, "amcl_pose_cov.txt")
     ts_path           = os.path.join(pose_dir, "timestamps.txt")
     joints_path       = os.path.join(pose_dir, "joints_pose.json")
-    for p in (ee_path, amcl_path, amcl_cov_path, ts_path):
+    T_bc_path         = os.path.join(pose_dir, "T_bc.txt")
+    tf_static_path    = os.path.join(pose_dir, "tf_static.json")
+    for p in (ee_path, amcl_path, amcl_cov_path, ts_path, T_bc_path):
         with open(p, "w"):
             pass
 
     joints_map: Dict[str, Dict[str, float]] = {}
+    # Per-joint accumulator: Fetch publishes gripper joints on a
+    # separate /joint_states topic from the main one; merging
+    # incrementally gives us the full robot state at every emit.
+    joints_accum: Dict[str, float] = {}
+
+    # tf edge caches: latest seen per (parent, child) pair.
+    tf_dynamic_edges: Dict[Tuple[str, str], np.ndarray] = {}
+    tf_static_edges: Dict[Tuple[str, str], np.ndarray] = {}
+    # T_bc emit counter (for diagnostics on missing-chain frames).
+    n_T_bc_emitted = 0
+    n_T_bc_missing = 0
 
     # Topic → (category) router.
     topic_cat = {
@@ -163,6 +233,8 @@ def extract(bag_path: str, out_dir: str, hz: float = 5.0) -> None:
         "/end_effector_pose":                      "ee",
         "/amcl_pose":                              "amcl",
         "/joint_states":                           "joints",
+        "/tf":                                     "tf",
+        "/tf_static":                              "tf_static",
     }
 
     period_ns = int(1e9 / hz)
@@ -171,7 +243,7 @@ def extract(bag_path: str, out_dir: str, hz: float = 5.0) -> None:
     save_idx = 0
 
     def emit_frame(rgb_msg, rgb_t: int) -> None:
-        nonlocal save_idx
+        nonlocal save_idx, n_T_bc_emitted, n_T_bc_missing
 
         # ---- RGB -------------------------------------------------------
         try:
@@ -235,13 +307,27 @@ def extract(bag_path: str, out_dir: str, hz: float = 5.0) -> None:
             with open(amcl_cov_path, "a") as f:
                 f.write(f"{save_idx} " + " ".join(f"{v}" for v in cov) + "\n")
 
-        # Joints map -- collect for a single json at the end.
-        if latest.joints is not None:
-            names = list(latest.joints.name)
-            positions = list(latest.joints.position)
-            joints_map[f"{save_idx:06d}"] = {
-                n: float(p) for n, p in zip(names, positions)
-            }
+        # Joints: snapshot the per-joint accumulator (last-known position
+        # per joint). Fetch publishes on two /joint_states publishers
+        # (main + gripper); accumulating preserves both subsets.
+        if joints_accum:
+            joints_map[f"{save_idx:06d}"] = dict(joints_accum)
+
+        # T_bc: compose base_link -> head_camera_rgb_optical_frame from the
+        # latest tf edge cache. Saves the kinematic chain at this frame
+        # so the EKF tracker can attribute head pan/tilt/torso lift to
+        # camera motion (kinematic) rather than to objects (innovation).
+        T_bc = _compose_chain({**tf_static_edges, **tf_dynamic_edges})
+        if T_bc is not None:
+            tx, ty, tz = T_bc[:3, 3]
+            qx, qy, qz, qw = R_.from_matrix(T_bc[:3, :3]).as_quat()
+            with open(T_bc_path, "a") as f:
+                f.write(f"{save_idx} "
+                        f"{tx:.9f} {ty:.9f} {tz:.9f} "
+                        f"{qx:.9f} {qy:.9f} {qz:.9f} {qw:.9f}\n")
+            n_T_bc_emitted += 1
+        else:
+            n_T_bc_missing += 1
 
         # Timestamp (seconds, nanoseconds, stored separately)
         sec, nsec = rgb_t // int(1e9), rgb_t % int(1e9)
@@ -283,12 +369,41 @@ def extract(bag_path: str, out_dir: str, hz: float = 5.0) -> None:
                 latest.amcl = msg
             elif cat == "joints":
                 latest.joints = msg
+                # Per-joint accumulator (Fetch publishes gripper joints
+                # on a separate /joint_states publisher from the main one;
+                # both arrive on the same topic but with different
+                # subsets of joint names).
+                for n, p in zip(msg.name, msg.position):
+                    joints_accum[str(n)] = float(p)
+            elif cat == "tf":
+                for tr in msg.transforms:
+                    edge = (tr.header.frame_id, tr.child_frame_id)
+                    tf_dynamic_edges[edge] = _tf_msg_to_T(tr)
+            elif cat == "tf_static":
+                for tr in msg.transforms:
+                    edge = (tr.header.frame_id, tr.child_frame_id)
+                    tf_static_edges[edge] = _tf_msg_to_T(tr)
 
     # Flush joints map
     with open(joints_path, "w") as f:
         json.dump(joints_map, f, indent=2)
 
+    # Flush /tf_static for downstream debugging / re-composition.
+    tf_static_dump = {
+        f"{p}__{c}": np.asarray(T).tolist()
+        for (p, c), T in tf_static_edges.items()
+    }
+    with open(tf_static_path, "w") as f:
+        json.dump(tf_static_dump, f, indent=2)
+
     print(f"[extract] wrote {save_idx} frames to {out_dir}")
+    print(f"[T_bc]    composed {n_T_bc_emitted} / {save_idx} frames "
+          f"(missing chain on {n_T_bc_missing}).")
+    if n_T_bc_missing > 0 and n_T_bc_emitted == 0:
+        print("  WARNING: chain never composed -- check that /tf is in "
+              "the bag and contains the chain edges "
+              "base_link -> torso_lift_link -> head_pan_link -> "
+              "head_tilt_link.")
 
 
 # ---------------------------------------------------------------------------

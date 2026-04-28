@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.11)  20 APR 2026 11:59
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.11)  24 APR 2026 14:48
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -436,7 +436,7 @@ LaTeX Font Info:    Trying to load font information for U+msb on input line 30.
 (/usr/local/texlive/2026/texmf-dist/tex/latex/amsfonts/umsb.fd
 File: umsb.fd 2013/01/14 v3.01 AMS symbols B
 )
-LaTeX Font Info:    Trying to load font information for U+euf on input line 41.
+LaTeX Font Info:    Trying to load font information for U+euf on input line 87.
 
 
 (/usr/local/texlive/2026/texmf-dist/tex/latex/amsfonts/ueuf.fd
@@ -447,65 +447,65 @@ File: ueuf.fd 2013/01/14 v3.01 Euler Fraktur
 al/texlive/2026/texmf-dist/fonts/enc/dvips/cm-super/cm-super-ts1.enc}] [2]
 
 Package hyperref Warning: Token not allowed in a PDF string (Unicode):
-(hyperref)                removing `math shift' on input line 167.
+(hyperref)                removing `math shift' on input line 228.
 
 
 Package hyperref Warning: Token not allowed in a PDF string (Unicode):
-(hyperref)                removing `math shift' on input line 167.
-
-
-Package hyperref Warning: Token not allowed in a PDF string (Unicode):
-(hyperref)                removing `math shift' on input line 202.
-
-
-Package hyperref Warning: Token not allowed in a PDF string (Unicode):
-(hyperref)                removing `math shift' on input line 202.
-
-
-Overfull \hbox (47.70901pt too wide) in paragraph at lines 224--235
- []\OT1/cmr/bx/n/10.95 Predict.[] \OT1/cmr/m/n/10.95 Eq.[] is \OT1/cmr/m/it/10.
-95 first-order iden-tity \OT1/cmr/m/n/10.95 in the tan-gent at $\OML/cmm/m/it/1
-0.95 T[]$\OT1/cmr/m/n/10.95 : writ-ing the prior as $\OML/cmm/m/it/10.95 T[] []
-\OT1/cmr/m/n/10.95 (\OML/cmm/m/it/10.95 ^^X[]\OT1/cmr/m/n/10.95 )$
- []
+(hyperref)                removing `math shift' on input line 228.
 
 [3]
-Overfull \hbox (1.74147pt too wide) in paragraph at lines 327--331
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 263.
+
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 263.
+
+[4] [5] [6]
+Overfull \hbox (1.74147pt too wide) in paragraph at lines 567--571
 \OT1/cmr/m/n/10.95 To each in-dex $\OML/cmm/m/it/10.95 i \OMS/cmsy/m/n/10.95 2 
 I[]$ \OT1/cmr/m/n/10.95 we as-so-ciate a \OT1/cmr/m/it/10.95 Bernoulli com-po-n
 ent \OT1/cmr/m/n/10.95 with pa-ram-e-ters $\OML/cmm/m/it/10.95 B[] \OT1/cmr/m/n
 /10.95 = (\OML/cmm/m/it/10.95 r[]; `[]; T[]; P[]\OT1/cmr/m/n/10.95 )$,
  []
 
-[4] [5] [6] [7]
+[7] [8] [9]
 
 Package hyperref Warning: Token not allowed in a PDF string (Unicode):
-(hyperref)                removing `math shift' on input line 578.
-
-
-Package hyperref Warning: Token not allowed in a PDF string (Unicode):
-(hyperref)                removing `subscript' on input line 578.
+(hyperref)                removing `math shift' on input line 821.
 
 
 Package hyperref Warning: Token not allowed in a PDF string (Unicode):
-(hyperref)                removing `math shift' on input line 578.
+(hyperref)                removing `subscript' on input line 821.
 
-[8] [9] [10] [11] (./bernoulli_ekf.aux)
+
+Package hyperref Warning: Token not allowed in a PDF string (Unicode):
+(hyperref)                removing `math shift' on input line 821.
+
+[10] [11] [12] [13]
+Overfull \hbox (36.78781pt too wide) in paragraph at lines 1072--1077
+[]\OT1/cmr/m/n/10.95 Base-frame stor-age of $\OML/cmm/m/it/10.95 T[]; P[]$ \OT1
+/cmr/m/n/10.95 aligns with the ex-ist-ing \OT1/cmtt/m/n/10.95 pose[]update.gaus
+sian[]state.GaussianState
+ []
+
+[14] [15] [16] (./bernoulli_ekf.aux)
  ***********
 LaTeX2e <2025-11-01>
 L3 programming layer <2026-01-19>
  ***********
 Package rerunfilecheck Info: File `bernoulli_ekf.out' has not changed.
-(rerunfilecheck)             Checksum: 19074F96713B05115E182512CCEEAA76;3105.
+(rerunfilecheck)             Checksum: C4F71BA56160D8100C880D603D743F09;3504.
  ) 
 Here is how much of TeX's memory you used:
- 11522 strings out of 467525
- 175748 string characters out of 5418982
- 610570 words of memory out of 5000000
- 40182 multiletter control sequences out of 15000+600000
+ 11574 strings out of 467525
+ 176423 string characters out of 5418982
+ 611275 words of memory out of 5000000
+ 40202 multiletter control sequences out of 15000+600000
  649498 words of font info for 121 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
- 75i,13n,79p,581b,697s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 75i,13n,79p,602b,633s stack positions out of 10000i,1000n,20000p,200000b,200000s
 </usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx10.pfb
 ></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx12.pfb>
 </usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmex10.pfb><
@@ -528,10 +528,10 @@ ve/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy6.pfb></usr/local/texlive
 026/texmf-dist/fonts/type1/public/amsfonts/symbols/msam10.pfb></usr/local/texli
 ve/2026/texmf-dist/fonts/type1/public/amsfonts/symbols/msbm10.pfb></usr/local/t
 exlive/2026/texmf-dist/fonts/type1/public/cm-super/sfrm1095.pfb>
-Output written on bernoulli_ekf.pdf (11 pages, 327523 bytes).
+Output written on bernoulli_ekf.pdf (16 pages, 356968 bytes).
 PDF statistics:
- 426 PDF objects out of 1000 (max. 8388607)
- 351 compressed objects within 4 object streams
- 99 named destinations out of 1000 (max. 500000)
- 137 words of extra memory for PDF output out of 10000 (max. 10000000)
+ 523 PDF objects out of 1000 (max. 8388607)
+ 442 compressed objects within 5 object streams
+ 131 named destinations out of 1000 (max. 500000)
+ 145 words of extra memory for PDF output out of 10000 (max. 10000000)
 

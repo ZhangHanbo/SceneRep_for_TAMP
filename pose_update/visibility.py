@@ -1,152 +1,207 @@
-"""
-Visibility predicate p_v^(i) for the Bernoulli-EKF tracker
-(bernoulli_ekf.tex §9 eq. eq:pv).
+"""Visibility predicate p_v^(i) via depth-image ray-tracing (z-buffer test).
 
-A bounded, deterministic approximation of the true observer-dependent
-visibility. For each track i we compute
+For each track `i`, we ask: given the predicted object pose and a set of
+sampled surface points on the object, what fraction of those points
+would actually be visible in the current depth image?
 
-    p_v^(i) = 1[pi_K(T_cw^-1 T^(i)_{k|k-1}) in Omega_img]
-              * prod_{j != i} (1 - rho_{ij,k})
+For every sample point `p_obj` (object-local frame) attached to track i:
+  1. Transform to camera frame:  p_cam = T_co · p_obj.
+  2. Skip if behind camera (`p_cam.z ≤ eps`).
+  3. Project through intrinsics K to pixel `(u, v)`.
+  4. Skip if outside the image rectangle (frustum gate).
+  5. Read observed depth `d_actual = depth[v, u]`.
+  6. z-test: point is visible if `d_actual ≥ p_cam.z − τ`, where τ covers
+     depth-sensor noise and the object's own depth extent
+     (`τ = z_tol_abs + z_tol_rel · z + 2·obj_radius`).
 
-where pi_K is the pinhole projection of the object origin into the image
-plane (with a positive-depth gate), Omega_img = [0, W] x [0, H] is the
-image domain, and rho_{ij,k} is the fraction of track i's projected
-footprint that is both covered by track j and in front of it along the
-viewing ray. Distant or non-overlapping j contribute rho = 0.
+`p_v = n_visible / n_valid` where `n_valid` counts in-frustum samples
+with a finite, in-range depth reading. Edge cases:
+  * No in-frustum samples  →  p_v = 0.
+  * In frustum but all depths invalid (NaN / 0 / out of range)
+                            →  p_v = 1 (conservative: cannot claim
+                                       occlusion without evidence).
 
-Input shape. Each track is a dict with at least::
+Why depth ray-tracing over bbox overlap
+───────────────────────────────────────
+The previous `visibility_p_v` used only pairs of tracks with current
+detection bounding boxes as occluders, which mis-handled three
+common failure modes:
+  * Untracked occluders (walls, shelves, objects the detector didn't
+    emit). These are PRESENT in the depth image; a proper z-buffer
+    test picks them up automatically.
+  * Tracks WITHOUT a current detection bbox. The old code treated them
+    as fully visible (`p_v=1`), ignoring whatever was in front of them.
+  * Bbox overlap is a 2D approximation that systematically over- or
+    under-counts relative to the real 3D occlusion.
 
-    {
-        "oid": int,
-        "T": (4,4) np.ndarray,                # world-frame mean
-        "bbox_image": (x_min, y_min, x_max, y_max) or None,
-        "mean_depth_camera": float or None,   # along +Z in the camera
-    }
+A single pass over the depth image, vectorised across every sample
+point of every track, handles all of these in O(N_samples).
 
-Tracks without a projected bbox or depth skip the occlusion product
-(their p_v depends only on the centroid projection gate) -- useful for
-freshly-born tracks with no shape summary yet.
+Vectorisation
+─────────────
+All track samples are concatenated into a single (N_total, 3) array;
+the projection, in-frustum mask, and depth lookup are one NumPy
+operation each. Per-track reduction uses `np.bincount`; total work is
+O(N_total).
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 
 
-def project_centroid(T_wo: np.ndarray,
-                     T_cw: np.ndarray,
-                     K: np.ndarray,
-                     image_shape: tuple) -> Optional[tuple]:
-    """Project the object origin into the image plane.
+# ─────────────────────────────────────────────────────────────────────
+# Fibonacci-sphere fallback when a track has no ref_points
+# ─────────────────────────────────────────────────────────────────────
 
-    Returns (u, v, depth) if the projection is in front of the camera and
-    inside [0, W] x [0, H], else None.
+def _fibonacci_sphere(n: int, radius: float) -> np.ndarray:
+    """Return N approximately-uniform points on a sphere of given radius.
+
+    Deterministic (Fibonacci spiral), so results are reproducible across
+    runs without needing an RNG.
     """
-    T_co = np.linalg.inv(T_cw) @ T_wo
-    p = T_co[:3, 3]
-    depth = float(p[2])
-    if depth <= 0.0:
-        return None
-    uv_h = K @ p
-    if uv_h[2] <= 0.0:
-        return None
-    u = float(uv_h[0] / uv_h[2])
-    v = float(uv_h[1] / uv_h[2])
-    H, W = int(image_shape[0]), int(image_shape[1])
-    if u < 0.0 or u >= W or v < 0.0 or v >= H:
-        return None
-    return (u, v, depth)
+    n = max(int(n), 1)
+    i = np.arange(n, dtype=np.float64) + 0.5
+    phi = np.arccos(1.0 - 2.0 * i / n)
+    golden = np.pi * (3.0 - np.sqrt(5.0))
+    theta = golden * i
+    x = np.cos(theta) * np.sin(phi)
+    y = np.sin(theta) * np.sin(phi)
+    z = np.cos(phi)
+    return np.column_stack([x, y, z]) * float(radius)
 
 
-def _bbox_area(bbox: tuple) -> float:
-    xmin, ymin, xmax, ymax = bbox
-    w = max(0.0, float(xmax) - float(xmin))
-    h = max(0.0, float(ymax) - float(ymin))
-    return w * h
+# ─────────────────────────────────────────────────────────────────────
+# Main entry: vectorised batch visibility over all tracks
+# ─────────────────────────────────────────────────────────────────────
 
-
-def _bbox_intersection_area(a: tuple, b: tuple) -> float:
-    ax0, ay0, ax1, ay1 = a
-    bx0, by0, bx1, by1 = b
-    x0 = max(ax0, bx0); y0 = max(ay0, by0)
-    x1 = min(ax1, bx1); y1 = min(ay1, by1)
-    if x1 <= x0 or y1 <= y0:
-        return 0.0
-    return (x1 - x0) * (y1 - y0)
-
-
-def occlusion_coefficient(bbox_i: tuple, depth_i: float,
-                          bbox_j: tuple, depth_j: float) -> float:
-    """Eq. eq:rho.
-
-        rho_{ij} = 1[d_j < d_i] * |A_j & A_i| / |A_i|   in [0, 1]
-    """
-    if bbox_i is None or bbox_j is None:
-        return 0.0
-    if depth_i is None or depth_j is None:
-        return 0.0
-    if float(depth_j) >= float(depth_i):
-        return 0.0
-    area_i = _bbox_area(bbox_i)
-    if area_i <= 0.0:
-        return 0.0
-    inter = _bbox_intersection_area(bbox_i, bbox_j)
-    return max(0.0, min(1.0, inter / area_i))
-
-
-def visibility_p_v(tracks: List[Dict[str, Any]],
-                   K: np.ndarray,
-                   T_cw: np.ndarray,
-                   image_shape: tuple) -> Dict[int, float]:
-    """Compute p_v^(i) for every track supplied.
+def visibility_p_v(
+    tracks: List[Dict[str, Any]],
+    K: np.ndarray,
+    depth: np.ndarray,
+    image_shape: Tuple[int, int],
+    *,
+    max_samples_per_track: int = 256,
+    fallback_sphere_samples: int = 64,
+    fallback_obj_radius: float = 0.05,
+    z_tol_abs: float = 0.02,
+    z_tol_rel: float = 0.02,
+    min_depth: float = 0.1,
+    max_depth: float = 10.0,
+) -> Dict[int, float]:
+    """Compute `p_v[oid]` for every track via depth ray-tracing.
 
     Args:
-        tracks: list of per-track dicts (see module docstring).
+        tracks: list of per-track dicts. Each MUST contain:
+            `oid: int`
+            `T_co: (4, 4) np.ndarray` — camera-frame pose
+                (the filter's PREDICTED mean for this frame).
+        Each MAY contain:
+            `ref_points_obj: (N, 3) np.ndarray` — object-local surface
+                cloud (e.g. `PoseEstimator._refs[oid].ref_points`).
+                When provided, used as the sample source; otherwise
+                falls back to a Fibonacci sphere of `obj_radius`.
+            `obj_radius: float` — object extent in metres. Used for
+                sphere-sample radius AND for the z-test geometric
+                tolerance (`2·obj_radius`). Default
+                `fallback_obj_radius`.
         K: (3, 3) camera intrinsics.
-        T_cw: (4, 4) camera-to-world pose (the inverse maps world to camera).
-        image_shape: (H, W) or (H, W, C).
+        depth: (H, W) float32 depth image in metres. NaN / 0 / out-of-
+            range values are treated as "no information" (conservative:
+            excluded from the denominator).
+        image_shape: (H, W).
+        max_samples_per_track: if a track's `ref_points_obj` is longer
+            than this, it's downsampled (deterministic stride).
+        fallback_sphere_samples: N for the Fibonacci sphere fallback.
+        z_tol_abs, z_tol_rel: depth-sensor noise tolerance,
+            `τ_sensor = z_tol_abs + z_tol_rel · z`.
+        min_depth, max_depth: valid depth range (values outside are
+            treated as invalid).
 
     Returns:
-        dict oid -> p_v in [0, 1]. A track whose centroid does not project
-        into the image receives 0; a track that projects in-frame but has
-        no bbox/depth information receives the pure frustum-gate value
-        (prod over occluders is 1).
+        dict `{oid: p_v in [0, 1]}`. `p_v = 0` means fully out-of-FOV
+        or fully occluded; `p_v = 1` means fully visible (no evidence
+        of occlusion at any sample).
     """
+    H, W = int(image_shape[0]), int(image_shape[1])
+    K = np.asarray(K, dtype=np.float64)
+    depth = np.asarray(depth)
+    if depth.dtype != np.float64:
+        depth = depth.astype(np.float64, copy=False)
+
+    if not tracks:
+        return {}
+
+    # ── Stage 1: stack all samples across tracks in one (N_total, 3) array.
+    all_pts_cam: List[np.ndarray] = []
+    all_geom_tol: List[np.ndarray] = []
+    all_track_idx: List[np.ndarray] = []
+    oids: List[int] = []
+    for i, tr in enumerate(tracks):
+        oid = int(tr["oid"])
+        T_co = np.asarray(tr["T_co"], dtype=np.float64)
+        obj_radius = float(tr.get("obj_radius", fallback_obj_radius))
+        ref_pts = tr.get("ref_points_obj")
+        if ref_pts is None or len(ref_pts) == 0:
+            pts_obj = _fibonacci_sphere(fallback_sphere_samples, obj_radius)
+        else:
+            pts_obj = np.asarray(ref_pts, dtype=np.float64)
+            if len(pts_obj) > max_samples_per_track:
+                idx = np.linspace(0, len(pts_obj) - 1,
+                                   max_samples_per_track).astype(np.int64)
+                pts_obj = pts_obj[idx]
+        # Transform to camera frame.
+        pts_cam = pts_obj @ T_co[:3, :3].T + T_co[:3, 3]
+        all_pts_cam.append(pts_cam)
+        all_geom_tol.append(np.full(len(pts_cam),
+                                      2.0 * obj_radius,
+                                      dtype=np.float64))
+        all_track_idx.append(np.full(len(pts_cam), i, dtype=np.int64))
+        oids.append(oid)
+
+    pts_cam = np.concatenate(all_pts_cam, axis=0)
+    geom_tol = np.concatenate(all_geom_tol)
+    track_idx_all = np.concatenate(all_track_idx)
+    n_tracks = len(oids)
+
+    # ── Stage 2: project everything at once.
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+    z = pts_cam[:, 2]
+    in_front = z > min_depth
+    safe_z = np.where(in_front, z, 1.0)
+    u = fx * pts_cam[:, 0] / safe_z + cx
+    v = fy * pts_cam[:, 1] / safe_z + cy
+    ui = np.rint(u).astype(np.int64)
+    vi = np.rint(v).astype(np.int64)
+    in_img = in_front & (ui >= 0) & (ui < W) & (vi >= 0) & (vi < H)
+
+    # ── Stage 3: vectorised depth lookup (use safe indices for OOB pixels).
+    ui_safe = np.where(in_img, ui, 0)
+    vi_safe = np.where(in_img, vi, 0)
+    d_actual = depth[vi_safe, ui_safe]
+    valid_depth = (np.isfinite(d_actual)
+                    & (d_actual > min_depth)
+                    & (d_actual < max_depth))
+    valid = in_img & valid_depth
+
+    # ── Stage 4: z-test. "Visible" = nothing closer than (z − τ).
+    tol = z_tol_abs + z_tol_rel * z + geom_tol
+    visible = valid & (d_actual >= z - tol)
+
+    # ── Stage 5: per-track reduction via bincount.
+    n_in_fov = np.bincount(track_idx_all[in_img], minlength=n_tracks)
+    n_valid = np.bincount(track_idx_all[valid], minlength=n_tracks)
+    n_vis = np.bincount(track_idx_all[visible], minlength=n_tracks)
+
     out: Dict[int, float] = {}
-
-    projections: Dict[int, Optional[tuple]] = {}
-    for t in tracks:
-        oid = int(t["oid"])
-        T_wo = np.asarray(t["T"], dtype=np.float64)
-        projections[oid] = project_centroid(T_wo, T_cw, K, image_shape)
-
-    # Precompute bboxes and depths for occlusion.
-    bbox_map: Dict[int, Optional[tuple]] = {}
-    depth_map: Dict[int, Optional[float]] = {}
-    for t in tracks:
-        oid = int(t["oid"])
-        bbox_map[oid] = t.get("bbox_image")
-        depth_map[oid] = t.get("mean_depth_camera")
-
-    for t in tracks:
-        oid = int(t["oid"])
-        p = projections.get(oid)
-        if p is None:
+    for i, oid in enumerate(oids):
+        if n_in_fov[i] == 0:
             out[oid] = 0.0
-            continue
-        bbox_i = bbox_map.get(oid)
-        depth_i = depth_map.get(oid)
-        prod = 1.0
-        if bbox_i is not None and depth_i is not None:
-            for j, bbox_j in bbox_map.items():
-                if j == oid:
-                    continue
-                depth_j = depth_map.get(j)
-                if bbox_j is None or depth_j is None:
-                    continue
-                rho = occlusion_coefficient(bbox_i, depth_i, bbox_j, depth_j)
-                prod *= (1.0 - rho)
-        out[oid] = max(0.0, min(1.0, prod))
+        elif n_valid[i] == 0:
+            out[oid] = 1.0            # no depth info → conservative
+        else:
+            out[oid] = float(n_vis[i]) / float(n_valid[i])
     return out

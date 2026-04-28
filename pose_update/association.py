@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple
 
 import numpy as np
 from scipy.optimize import linear_sum_assignment
@@ -41,15 +41,25 @@ class AssociationResult:
                A track oid NOT in this dict is unassigned.
         unmatched_tracks: list of track oids with no detection.
         unmatched_detections: list of detection indices with no track.
-        cost_matrix: (n_tracks, n_dets) cost used (diagnostic).
+        cost_matrix: (n_tracks, n_dets) total cost used (diagnostic).
         gated_pairs: number of (track, det) pairs inside the outer gate
                      that passed the label filter (diagnostic).
+        d2_full_matrix: (n_tracks, n_dets) full 6-D Mahalanobis squared
+                        distance per pair (NaN where infeasible). For
+                        diagnostics: ν^T S^-1 ν.
+        d2_trans_matrix: (n_tracks, n_dets) translation-only d^2 per
+                         pair: ν_t^T S_tt^-1 ν_t (NaN where infeasible).
+        d2_rot_matrix: (n_tracks, n_dets) rotation-only d^2 per pair
+                       (NaN where infeasible).
     """
     match: Dict[int, int]
     unmatched_tracks: List[int]
     unmatched_detections: List[int]
     cost_matrix: np.ndarray
     gated_pairs: int
+    d2_full_matrix: Optional[np.ndarray] = None
+    d2_trans_matrix: Optional[np.ndarray] = None
+    d2_rot_matrix: Optional[np.ndarray] = None
 
 
 def hungarian_associate(
@@ -63,38 +73,94 @@ def hungarian_associate(
     alpha: float = 0.0,
     G_out: float = 25.0,
     enforce_label_match: bool = True,
+    track_label_histories: Optional[Mapping[int, Any]] = None,
+    label_penalty: float = 0.0,
+    score_weight: float = 0.0,
+    gate_mode: str = "full",
+    G_out_trans: float = 21.108,
+    G_out_rot: float = 21.108,
+    cost_d2_mode: str = "full",
 ) -> AssociationResult:
     """Solve the Hungarian assignment of tracks to detections.
 
-    Cost (bernoulli_ekf.tex eq. eq:cost_sam2):
-        C[i, l] = d2[i, l] - alpha * 1[tau_l == tau_i]   (feasible)
-        C[i, l] = +INFEASIBLE                             (infeasible)
+    Cost (paper-baseline eq:cost_sam2 plus the perception-pipeline soft
+    label / score additions; the perception pipeline at
+    `rosbag2dataset/sam2/sam2_client.py::_pair_cost` uses the same
+    formula in IoU units):
 
-    A pair is infeasible if (a) class labels disagree (when
-    ``enforce_label_match``), or (b) d2 exceeds the chi^2 outer gate
-    ``G_out`` = 25 (chi^2_6(0.9997)).
+        C[i, l] =   d2[i, l]
+                  - alpha  * 1[tau_l == tau_i]
+                  + label_penalty * 1[d_label NOT in track i's label history]
+                  + score_weight  * (1 - score_l)
+                  (feasible)
+        C[i, l] = +INFEASIBLE      (infeasible)
+
+    A pair is infeasible if EITHER:
+      (a) `enforce_label_match=True` AND label strings disagree (paper
+          hard-gate behaviour), OR
+      (b) `d2 > G_out` (chi^2 outer gate, default chi^2_6(0.9997) = 25).
+
+    Set `enforce_label_match=False` and `label_penalty>0` to switch to
+    the perception-pipeline-style SOFT label gate: a class-label mismatch
+    becomes a finite additive cost rather than an infeasibility, so a
+    geometrically excellent (small d2) pair can override a label
+    disagreement when the labels are noisy. This mirrors the perception
+    pipeline's `(1 - IoU) + label_pen + score_pen` cost.
 
     Args:
         track_oids: ordered list of track object ids currently tracked.
-        detections: list of per-frame detections in the orchestrator's
-            canonical dict format (must contain 'T_co', 'R_icp', 'label';
-            'sam2_id' optional).
+        detections: per-frame detections in the orchestrator's canonical
+            dict format (must contain 'T_co', 'R_icp', 'label'; 'sam2_id'
+            and 'score' optional).
         innovation_fn: callable (oid, T_co, R_icp) -> (nu, S, d2, log_lik)
-            or None if the innovation is undefined (no particle holds oid).
-            This is typically `RBPFState.innovation_stats`.
-        track_labels: mapping track oid -> class label string.
-        track_tau: optional mapping track oid -> last SAM2 tracklet id (as
-            an int). Missing or negative values signal "no prior ID" and
-            never trigger the alpha bonus. Default None disables the ID
-            prior entirely (equivalent to passing an empty mapping).
-        alpha: SAM2 continuity bonus in Mahalanobis-squared units. Default
-            0 (no bonus). Values in [4.4, 5.9] correspond to q_s in
-            [0.9, 0.95] in the paper.
-        G_out: chi^2 outer-gate threshold. Pairs beyond this are infeasible.
-            Default 25.0 = chi^2_6(0.9997).
-        enforce_label_match: if True, only (track, det) pairs with matching
-            class labels are feasible. Disable only for label-agnostic
-            tests.
+            or None when the innovation is undefined.
+        track_labels: mapping track oid -> primary class label string.
+        track_tau: optional mapping track oid -> last SAM2 tracklet id;
+            missing / negative -> no alpha bonus.
+        alpha: SAM2 continuity bonus in chi^2_6 units (paper default 4.4;
+            0 disables).
+        G_out: chi^2_6 outer-gate threshold. Pairs with d2 above this are
+            infeasible regardless of label.
+        enforce_label_match: True -> hard label gate (paper); False ->
+            soft additive label penalty (perception-style).
+        track_label_histories: optional mapping track oid -> container of
+            labels ever associated with that track. Acceptable forms:
+              * a Set[str] / List[str] / dict[str, ...]   (only key
+                membership matters: `d_label in history`).
+            When None, falls back to the singleton `{track_labels[oid]}`.
+        label_penalty: chi^2_6-unit additive penalty applied to a pair
+            when (1) `enforce_label_match=False` AND (2) the detection's
+            label is NOT in the track's label history. Default 0 disables
+            the soft gate. Reasonable values: 4-8 (less than G_out so a
+            wrong-label same-position pair can still match; large enough
+            that a same-label pair is preferred when both are feasible).
+        score_weight: chi^2_6-unit additive weight on `(1 - det.score)`
+            applied to every feasible pair. Mildly disfavours
+            low-confidence detections without making them infeasible.
+            Default 0 disables.
+        gate_mode: which Mahalanobis component drives the outer gate.
+            'full'  -> gate on the full 6-D d^2 vs `G_out`
+                       (paper-baseline behaviour).
+            'trans' -> gate on translation-only d^2 vs `G_out_trans`
+                       (chi^2_3 quantile, default 21.108 = 99.97%).
+                       Useful when ICP rotation is unreliable (chained
+                       per-oid ICP drifts even at the same physical
+                       position; the rot block of d^2 then saturates
+                       the full gate spuriously).
+            'trans_and_rot' -> gate on BOTH translation (vs `G_out_trans`)
+                       and rotation (vs `G_out_rot`) blocks. A pair is
+                       feasible iff both pass.
+        G_out_trans: chi^2_3 outer-gate threshold for the translation
+            block. Default 21.108 = chi^2_3(0.9997).
+        G_out_rot: chi^2_3 outer-gate threshold for the rotation block,
+            used only by `gate_mode='trans_and_rot'`. Default 21.108
+            = chi^2_3(0.9997).
+        cost_d2_mode: which d^2 enters the cost matrix.
+            'full'  -> cost = d^2_full - alpha*..  (paper baseline)
+            'trans' -> cost = d^2_trans - alpha*.. (drops rotation from
+                       the cost; rotation only gates / not gates).
+            'sum'   -> cost = d^2_trans + 0.1*d^2_rot - alpha*..
+                       (heavy translation, light rotation tie-break).
 
     Returns:
         AssociationResult.
@@ -105,6 +171,9 @@ def hungarian_associate(
     cost = np.full((max(n_tracks, 1), max(n_dets, 1)), _INFEASIBLE,
                    dtype=np.float64)
     log_liks = np.full_like(cost, -np.inf, dtype=np.float64)
+    d2_full_mat = np.full_like(cost, np.nan, dtype=np.float64)
+    d2_trans_mat = np.full_like(cost, np.nan, dtype=np.float64)
+    d2_rot_mat = np.full_like(cost, np.nan, dtype=np.float64)
     gated = 0
 
     if n_tracks == 0 or n_dets == 0:
@@ -117,22 +186,30 @@ def hungarian_associate(
             unmatched_detections=unmatched_dets,
             cost_matrix=cost,
             gated_pairs=gated,
+            d2_full_matrix=d2_full_mat,
+            d2_trans_matrix=d2_trans_mat,
+            d2_rot_matrix=d2_rot_mat,
         )
 
     # Fill the cost matrix.
     for i, oid in enumerate(track_oids):
         t_label = track_labels.get(oid, None)
+        t_history = (track_label_histories.get(oid)
+                      if track_label_histories is not None else None)
         t_tau = None
         if track_tau is not None:
             t_tau_val = track_tau.get(oid, -1)
             t_tau = int(t_tau_val) if (t_tau_val is not None
                                        and t_tau_val >= 0) else None
         for l, det in enumerate(detections):
+            d_label = det.get("label", None)
+
+            # (a) Hard label gate (paper default).
             if enforce_label_match:
-                d_label = det.get("label", None)
                 if t_label is not None and d_label is not None \
                         and d_label != t_label:
                     continue
+
             T_co = det.get("T_co")
             R_icp = det.get("R_icp")
             if T_co is None or R_icp is None:
@@ -141,14 +218,52 @@ def hungarian_associate(
                                   np.asarray(R_icp, dtype=np.float64))
             if stats is None:
                 continue
-            _nu, _S, d2, log_lik = stats
-            if not math.isfinite(d2) or d2 > G_out:
-                continue
-            # SAM2 continuity bonus. `sam2_id` is preferred; fall back to
-            # `id` (the upstream tracklet id under the test harness convention)
-            # so that stable SAM2 identity still fires the alpha bonus even
-            # when only the legacy `id` key is populated by the detector
-            # client.
+            nu, S, d2, log_lik = stats
+
+            # Block decomposition: translation (top-left 3x3 of S) and
+            # rotation (bottom-right 3x3 of S) Mahalanobis distances.
+            # Cross-coupling through the off-diagonal of S is dropped here;
+            # for typical block-diagonal-dominant S (the case for
+            # right-multiplicative SE(3) noise) the sum d2_t + d2_r is a
+            # tight bound on d2_full.
+            try:
+                S_tt = S[:3, :3]
+                S_rr = S[3:, 3:]
+                Sinv_t_nu = np.linalg.solve(S_tt, nu[:3])
+                Sinv_r_nu = np.linalg.solve(S_rr, nu[3:])
+                d2_trans = float(nu[:3] @ Sinv_t_nu)
+                d2_rot = float(nu[3:] @ Sinv_r_nu)
+            except np.linalg.LinAlgError:
+                d2_trans = float("inf")
+                d2_rot = float("inf")
+            d2_full_mat[i, l] = float(d2)
+            d2_trans_mat[i, l] = d2_trans
+            d2_rot_mat[i, l] = d2_rot
+
+            # (b) Outer gate. The mode picks which Mahalanobis component
+            # has to fit inside the chi^2 quantile.
+            if gate_mode == "trans":
+                if not math.isfinite(d2_trans) or d2_trans > G_out_trans:
+                    continue
+            elif gate_mode == "trans_and_rot":
+                if (not math.isfinite(d2_trans)
+                        or d2_trans > G_out_trans
+                        or not math.isfinite(d2_rot)
+                        or d2_rot > G_out_rot):
+                    continue
+            else:  # 'full' (paper baseline)
+                if not math.isfinite(d2) or d2 > G_out:
+                    continue
+
+            # Pick which d^2 enters the cost.
+            if cost_d2_mode == "trans":
+                d2_for_cost = d2_trans
+            elif cost_d2_mode == "sum":
+                d2_for_cost = d2_trans + 0.1 * d2_rot
+            else:
+                d2_for_cost = d2
+
+            # SAM2 continuity bonus.
             bonus = 0.0
             if alpha > 0.0 and t_tau is not None:
                 d_tau_raw = det.get("sam2_id", det.get("id"))
@@ -156,7 +271,31 @@ def hungarian_associate(
                     d_tau = int(d_tau_raw)
                     if d_tau >= 0 and d_tau == t_tau:
                         bonus = alpha
-            cost[i, l] = float(d2) - bonus
+
+            # Soft label penalty (perception-style). Only applies when
+            # the hard label gate is OFF; otherwise the cell would have
+            # been infeasible above anyway.
+            label_pen = 0.0
+            if (not enforce_label_match
+                    and label_penalty > 0.0
+                    and d_label is not None):
+                # Membership test handles Set / Mapping / List / None.
+                in_history = (
+                    (t_history is not None and d_label in t_history)
+                    or (t_history is None and t_label is not None
+                        and d_label == t_label)
+                )
+                if not in_history:
+                    label_pen = float(label_penalty)
+
+            # Score penalty (perception-style). Per-detection bias --
+            # mildly disfavours low-confidence detections.
+            score_pen = 0.0
+            if score_weight > 0.0:
+                d_score = float(det.get("score", 1.0))
+                score_pen = float(score_weight) * max(0.0, 1.0 - d_score)
+
+            cost[i, l] = float(d2_for_cost) - bonus + label_pen + score_pen
             log_liks[i, l] = float(log_lik)
             gated += 1
 
@@ -186,6 +325,9 @@ def hungarian_associate(
         unmatched_detections=unmatched_dets,
         cost_matrix=cost[:n_tracks, :n_dets],
         gated_pairs=gated,
+        d2_full_matrix=d2_full_mat[:n_tracks, :n_dets],
+        d2_trans_matrix=d2_trans_mat[:n_tracks, :n_dets],
+        d2_rot_matrix=d2_rot_mat[:n_tracks, :n_dets],
     )
 
 
