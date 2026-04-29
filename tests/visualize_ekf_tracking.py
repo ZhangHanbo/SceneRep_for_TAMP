@@ -3225,6 +3225,13 @@ def main():
     rgb_dir = os.path.join(ds_root, "rgb")
     depth_dir = os.path.join(ds_root, "depth")
     det_dir = os.path.join(viz_root, "perception", "detection_h")
+    if not os.path.isdir(det_dir):
+        # Fall back to the dataset-side perception output. apple_in_the_tray
+        # has a hand-curated cache under tests/visualization_pipeline/...;
+        # the other trajectories ship detections directly in datasets/.
+        ds_det = os.path.join(ds_root, "detection_h")
+        if os.path.isdir(ds_det):
+            det_dir = ds_det
     pose_path = os.path.join(ds_root, "pose_txt", "amcl_pose.txt")
     out_dir = os.path.join(viz_root, args.out_subdir)
     state_dir = os.path.join(viz_root, args.state_subdir)
