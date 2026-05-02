@@ -151,9 +151,18 @@ No single existing system combines *all* of: open-vocabulary detection, per-obje
 
 ## 4. Algorithmic Improvements for Tight Coupling
 
+> **Status (2026-04-30):** subsections 4.1, 4.3, and 4.5 are implemented;
+> 4.2, 4.4, and 4.6 are not. Per-subsection status is annotated below.
+
 The current system is a *pipeline architecture*: each component passes point estimates forward without propagating uncertainty or enabling joint optimization. This section provides concrete formulations for tighter coupling.
 
 ### 4.1 Joint Factor Graph Optimization
+
+> **Status: Implemented.** `pose_update/factor_graph.py::PoseGraphOptimizer`
+> with `Observation`, `RelationEdge`, `OptimizationResult`. Wraps factors
+> in adaptive Barron kernels (`pose_update/adaptive_kernel.py`). Triggered
+> from the orchestrator slow tier. Manipulation rigid-attach factors
+> active during `holding`/`grasping` (see `pose_update/ekf_se3.py`).
 
 **Current:** Sequential — camera pose → object pose → scene graph.
 
@@ -175,6 +184,9 @@ This allows the scene graph relation "cup ON table" to constrain the cup's z-coo
 
 ### 4.2 Differentiable Rendering for End-to-End Optimization
 
+> **Status: Not implemented.** TSDF only; no neural SDF or 3D Gaussian
+> Splatting backend.
+
 Replace TSDF with a differentiable representation and optimize all parameters jointly via rendering loss.
 
 **Neural SDF approach (à la vMAP):** Each object $k$ has MLP $f_{\theta_k}$ mapping position to SDF + color. Gradients flow from photometric loss through the renderer into object MLP parameters, object poses, and camera poses simultaneously.
@@ -184,6 +196,13 @@ Replace TSDF with a differentiable representation and optimize all parameters jo
 **Practical recommendation:** Hybrid — use TSDF for fast online fusion, periodically distill into a differentiable representation for batch pose optimization.
 
 ### 4.3 Probabilistic / Bayesian Formulation
+
+> **Status: Implemented.** EKF on SE(3) per object
+> (`pose_update/ekf_se3.py`); `pose_cov`, `label_belief`, property-backed
+> `pose_uncertain` on `scene/scene_object.py`; Beta-Bernoulli label
+> belief via `update_label_belief`; phase-conditioned process noise via
+> `process_noise_for_phase`; base-frame fusion via `ekf_update_base_frame`
+> for held / grasping / releasing targets.
 
 **Current:** Deterministic poses + boolean `pose_uncertain` flag.
 
@@ -205,6 +224,10 @@ $$p(r_{ij} | T_o^i, T_o^j) = \text{softmax}(\phi(T_o^i, T_o^j))$$
 
 ### 4.4 Active Perception / Next-Best-View
 
+> **Status: Not implemented.** No view planner; the visibility predicate
+> (`pose_update/visibility.py`) reports current visibility but does not
+> propose actions to reduce uncertainty.
+
 **Information-theoretic view planning:**
 $$v^* = \arg\max_v I(X; Z_v | Z_{1:t})$$
 
@@ -217,12 +240,23 @@ where $H(D(x))$ is entropy estimated from weight $W(x)$.
 
 ### 4.5 Manipulation-Aware SLAM
 
+> **Status: Implemented.** Gripper FSM in `pose_update/gripper_state.py`
+> drives action-conditioned process noise via
+> `pose_update/ekf_se3.py::process_noise_for_phase`; rigid-attachment
+> factors during `holding`/`grasping` are added by
+> `TwoTierOrchestrator.should_apply_rigid` (`pose_update/orchestrator.py`)
+> and consumed by `PoseGraphOptimizer`. Failed-grasp signals propagate via
+> the existence-probability decay (paper eq:r_miss).
+
 **Action-conditioned motion model:**
 $$p(T_o^{k,t+1} | T_o^{k,t}, a_t) = \begin{cases} \delta(T_{ee}^{t+1} T_{oe}^k) & \text{if } a_t = \text{hold}(k) \\ \mathcal{N}(T_o^{k,t}, \Sigma_{static}) & \text{if } a_t \text{ doesn't involve } k \\ p_{physics}(T_o^{k,t+1} | T_o^{k,t}, a_t) & \text{if } a_t = \text{push}(k) \end{cases}$$
 
 **Manipulation as observation:** A successful grasp provides a precise pose observation. A failed grasp tells us the object was not where expected. Both are informative factors.
 
 ### 4.6 Uncertainty in the Representation Itself
+
+> **Status: Not implemented.** No per-voxel TSDF variance; collision
+> margins come from a fixed pose covariance, not shape-level uncertainty.
 
 **TSDF-level uncertainty:** Track per-voxel variance:
 $$\sigma^2_D(x) = \frac{\sum_i w_i (d_i(x) - D(x))^2}{\sum_i w_i}$$
@@ -233,15 +267,15 @@ High-variance regions near planned grasp contacts should trigger re-observation.
 
 ---
 
-## 5. Synthesis: Prioritized Roadmap
+## 5. Synthesis: Prioritized Roadmap (Status 2026-04-30)
 
-| Priority | Improvement | Effort | Impact | What it enables |
-|----------|-------------|--------|--------|----------------|
-| 1 | Probabilistic pose + label tracking (EKF on SE(3)) | Medium | High | Principled phase-switching, uncertainty-aware planning, connects to alpha_robot calibration |
-| 2 | Factor graph for joint camera-object optimization | High | High | Replaces sequential pipeline with jointly optimal solution, scene graph as constraints |
-| 3 | Active perception (information-theoretic view planning) | Medium | Medium | Reduces reconstruction uncertainty, leverages idle time between manipulation |
-| 4 | Neural representation hybrid (TSDF + neural SDF distillation) | High | Medium | Surface completion, differentiable optimization, better grasp planning |
-| 5 | Manipulation-aware predictive tracking | Low | Medium | Handles occlusion during manipulation, physics-based prediction |
+| Priority | Improvement | Status | Implemented in / Notes |
+|---|---|---|---|
+| 1 | Probabilistic pose + label tracking (EKF on SE(3)) | **Done** | `pose_update/ekf_se3.py` + `scene/scene_object.py` (Section 4.3) |
+| 2 | Factor graph for joint camera-object optimization | **Done** | `pose_update/factor_graph.py::PoseGraphOptimizer` + adaptive kernel `pose_update/adaptive_kernel.py` (Section 4.1). **Migration gap:** `data_demo.py` / `realtime_app.py` still call legacy `refine_camera_pose` |
+| 3 | Active perception (information-theoretic view planning) | Not started | No view planner; visibility predicate (`pose_update/visibility.py`) is read-only (Section 4.4) |
+| 4 | Neural representation hybrid (TSDF + neural SDF distillation) | Not started | TSDF only (Section 4.2, 4.6) |
+| 5 | Manipulation-aware predictive tracking | **Done** | Gripper FSM `pose_update/gripper_state.py` + phase-conditioned process noise + rigid-attachment factors (Section 4.5) |
 
 ---
 

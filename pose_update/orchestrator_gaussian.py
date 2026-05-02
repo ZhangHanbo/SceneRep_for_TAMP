@@ -35,7 +35,10 @@ from pose_update.factor_graph import (
     PoseGraphOptimizer, Observation, RelationEdge, OptimizationResult,
 )
 from pose_update.gaussian_state import GaussianState
+from pose_update.gravity_predict import predict_landing_pose
+from pose_update.object_dynamics import lookup_dynamics
 from pose_update.orchestrator import TriggerConfig  # reuse
+from pose_update.voxel_observability import VoxelObservability
 
 
 class TwoTierOrchestratorGaussian:
@@ -52,7 +55,10 @@ class TwoTierOrchestratorGaussian:
                  optimizer: Optional[PoseGraphOptimizer] = None,
                  T_bc: Optional[np.ndarray] = None,
                  iekf_iters: int = 2,
-                 verbose: bool = False):
+                 verbose: bool = False,
+                 voxel_obs: Optional[VoxelObservability] = None,
+                 gravity_predict_enabled: bool = True,
+                 workspace_floor_z: float = -1.0):
         """Args:
             slam_backend: backend whose `step()` returns a `PoseEstimate`
                           (or `ParticlePose` — will be collapsed to Gaussian).
@@ -60,12 +66,23 @@ class TwoTierOrchestratorGaussian:
             optimizer:    factor-graph optimizer (default PoseGraphOptimizer).
             T_bc:         camera-in-base transform; identity if None.
             iekf_iters:   inner IEKF iteration count for measurement update.
+            voxel_obs:    optional voxel observability grid for the
+                          gravity-aware predict at release. None disables
+                          gravity_predict.
+            gravity_predict_enabled: master switch for the release-time
+                          gravity_predict overwrite. Defaults to True; the
+                          method is still no-op when voxel_obs is None.
+            workspace_floor_z: world-z used as the gravity raycast floor
+                          when the column is fully unobserved.
         """
         self.slam = slam_backend
         self.trigger = trigger or TriggerConfig()
         self.optimizer = optimizer or PoseGraphOptimizer()
         self.iekf_iters = iekf_iters
         self.verbose = verbose
+        self.voxel_obs = voxel_obs
+        self.gravity_predict_enabled = gravity_predict_enabled
+        self.workspace_floor_z = float(workspace_floor_z)
 
         self.state = GaussianState(T_bc=T_bc)
 
@@ -82,6 +99,8 @@ class TwoTierOrchestratorGaussian:
 
         self._cached_relations: List[RelationEdge] = []
         self._prev_T_bg: Optional[np.ndarray] = None
+        # Diagnostic log of every gravity_predict overwrite (plan §C.2).
+        self._gravity_predict_log: List[Dict[str, Any]] = []
 
     # --------------------------------------------------------------- #
     #  Backward-compat view (world-frame poses)
@@ -138,6 +157,12 @@ class TwoTierOrchestratorGaussian:
 
         # 3. Fast tier
         self._fast_tier(detections, gripper_state, T_ec, T_bg)
+
+        # 3b. Gravity-aware one-shot predict at release transition
+        # (plan §C.2). Replaces the just-released oid's mean+cov with the
+        # post-fall prediction. No-op when voxel_obs is None or the FSM
+        # didn't just exit {holding, releasing}.
+        self._maybe_gravity_predict(gripper_state)
 
         # 4. Scene graph
         self._cached_relations = self._recompute_relations()
@@ -199,7 +224,14 @@ class TwoTierOrchestratorGaussian:
             )
 
         # Static-motion predict (base motion propagation + phase-aware Q).
-        self.state.predict_static(Q_fn)
+        # Tracks not observed last frame are kept at their keyframe cov
+        # (plan §C.1): only the deterministic mean update applies, so
+        # the world-frame uncertainty grows solely via the lever-arm of
+        # the current Σ_wb in collapsed_object_world.
+        unobserved_oids = {oid for oid, fso
+                           in self.frames_since_obs.items()
+                           if fso > 0 and oid in self.state.objects}
+        self.state.predict_static(Q_fn, unobserved_oids=unobserved_oids)
 
         # Per-frame tick.
         for oid in self.frames_since_obs:
@@ -244,6 +276,71 @@ class TwoTierOrchestratorGaussian:
                 if pe_world is not None and self.state.T_wb is not None:
                     T_ew = self.state.T_wb @ T_ec
                     self.T_oe[oid] = np.linalg.inv(T_ew) @ pe_world.T
+
+    # --------------------------------------------------------------- #
+    #  Gravity-aware predict at release (plan §C.2)
+    # --------------------------------------------------------------- #
+
+    def _maybe_gravity_predict(self,
+                                gripper_state: Dict[str, Any]) -> None:
+        """Replace the EKF mean+cov for a just-released oid with the
+        post-fall prediction from `pose_update.gravity_predict`.
+
+        Mirrors `pose_update/orchestrator.py:_maybe_gravity_predict`
+        (the RBPF orchestrator's hook). No-ops when:
+          * `gravity_predict_enabled` is False,
+          * `voxel_obs` is None,
+          * the FSM didn't just exit {holding, releasing},
+          * the just-released oid is no longer tracked.
+
+        After §C.1, the post-overwrite cov_bo (containing
+        `gravity_predict`'s σ_xy/σ_z/σ_yaw=π) is FROZEN by subsequent
+        per-frame predict_static calls (the bottle is unobserved).
+        """
+        if not self.gravity_predict_enabled:
+            return
+        if self.voxel_obs is None:
+            return
+        last_phase = self.last_state.get("phase", "idle")
+        cur_phase = gripper_state.get("phase", "idle")
+        manip = ("holding", "releasing")
+        if not (last_phase in manip and cur_phase not in manip):
+            return
+        just_released = self.last_state.get("held_obj_id")
+        if just_released is None:
+            return
+        pe_w = self.state.collapsed_object_world(just_released)
+        if pe_w is None:
+            return
+        label = self.object_labels.get(just_released)
+        dyn = lookup_dynamics(label)
+        # Live-object overlay: every other tracked oid contributes
+        # (x, y, z, radius) to the raycast collision check.
+        other_voxels = []
+        for oid, pe_o in self.state.collapsed_objects_world().items():
+            if oid == just_released:
+                continue
+            T = pe_o.T
+            other_dyn = lookup_dynamics(self.object_labels.get(oid))
+            other_voxels.append(
+                (float(T[0, 3]), float(T[1, 3]), float(T[2, 3]),
+                 float(other_dyn.radius_m)))
+        T_land, P_land, info = predict_landing_pose(
+            T_release=pe_w.T,
+            P_release=pe_w.cov,
+            voxel_obs=self.voxel_obs,
+            dyn=dyn,
+            workspace_floor_z=self.workspace_floor_z,
+            live_object_voxels=other_voxels,
+        )
+        ok = self.state.overwrite_object_pose(
+            just_released, T_land, P_land)
+        log_entry = info.as_dict()
+        log_entry["oid"] = int(just_released)
+        log_entry["frame"] = int(self.frame_count)
+        log_entry["written_back"] = bool(ok)
+        log_entry["label"] = label
+        self._gravity_predict_log.append(log_entry)
 
     # --------------------------------------------------------------- #
     #  Slow tier (Option A — same as RBPF, operates on world-frame collapse)

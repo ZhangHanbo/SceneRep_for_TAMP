@@ -1,5 +1,36 @@
 # SceneRep Improvement Plan — Condensed
 
+> **Implementation Status (2026-04-30):** Tasks 1–7 are largely landed. The
+> two-tier orchestrator runs in `pose_update/orchestrator.py` (Bernoulli/RBPF
+> backend) and `pose_update/orchestrator_gaussian.py` (Gaussian backend); the
+> joint pose graph is `pose_update/factor_graph.py::PoseGraphOptimizer`; the
+> per-object EKF lives in `pose_update/ekf_se3.py` with state on
+> `scene/scene_object.py`; the adaptive kernel is in
+> `pose_update/adaptive_kernel.py`; relation factors are in
+> `pose_update/factor_graph.py::relation_residual` (+ `RelationEdge`); the
+> SLAM protocol is `pose_update/slam_interface.py`. Bernoulli existence
+> probability and birth gating (`pose_update/birth_gating.py`) cover the
+> hypothesis-layer concept. The legacy `data_demo.py:530` and
+> `realtime_app.py:745` paths still call
+> `pose_update/camera_pose_refiner.py::refine_camera_pose` and have not yet
+> migrated to the orchestrator — tracked separately, out of scope for this doc.
+>
+> | Task | Implemented in |
+> |---|---|
+> | 1. Layer separation | `pose_update/slam_interface.py` (protocol); legacy paths still on `refine_camera_pose` |
+> | 2. Per-object EKF | `pose_update/ekf_se3.py`; `scene/scene_object.py` (`pose_cov`, `label_belief`, `pose_uncertain` property) |
+> | 3. Base-frame fusion | `pose_update/ekf_se3.py::ekf_update_base_frame` (folded into Task 2) |
+> | 4. Joint pose graph | `pose_update/factor_graph.py::PoseGraphOptimizer` (class API; the `optimize_frame()` function originally proposed below was never built — wired via the orchestrator slow tier instead) |
+> | 5. Adaptive kernel | `pose_update/adaptive_kernel.py` |
+> | 6. Relation factors | `pose_update/factor_graph.py::relation_residual`, `RelationEdge`; orchestrated by `pose_update/relation_orchestrator.py` and `relation_utils.py` |
+> | 7. Two-tier orchestration | `pose_update/orchestrator.py::TwoTierOrchestrator` and `orchestrator_gaussian.py` |
+> | 8. Verification | `tests/` — see "Verification — Actual Test Inventory" below |
+>
+> The narrative below is the original design proposal, preserved for context.
+> Concrete claims (file paths, function signatures, line counts) reflect the
+> *plan*, not the current code. Where signatures or call sites have evolved,
+> consult the source.
+
 Decoupled, actionable tasks. Each item can be implemented independently. Ordering reflects dependency, not priority.
 
 ## Scope
@@ -45,7 +76,13 @@ The two guarantees address different failure modes and compose without interfere
 
 ---
 
-## Module Interfaces
+## Module Interfaces (Original Proposal — see source for current API)
+
+> The signatures below are the **proposal**. Several diverged in
+> implementation: `optimize_frame()` became `class PoseGraphOptimizer`;
+> `ObjectEKF` became free functions in `pose_update/ekf_se3.py`;
+> `ObjectHypothesis` was subsumed by Bernoulli existence probability.
+> See `pose_update/` for the current source of truth.
 
 Shared types across modules:
 
@@ -271,115 +308,87 @@ Cross-checked each task against the current implementation. Summary: **the origi
 
 ---
 
-## Unit Test Plan
+## Verification — Actual Test Inventory
 
-Each test module grounds in fixtures extractable from the existing `apple_bowl_2` trajectory under `Mobile_Manipulation_on_Fetch/multi_objects/apple_bowl_2/`. Tests follow the existing `tests/test_api.py` pattern with `requires_data` markers for tests needing the trajectory.
+Verification grounds in the four trajectories shipped under
+`tests/visualization_pipeline/`: `apple_drop`, `apple_in_the_tray`,
+`apple_to_cabinate`, `apple_to_cabinate_look`. The headline driver is
+`tests/visualize_ekf_tracking.py --trajectory <name>`; its outputs are PNG
+panels, MP4 timelines, per-frame state JSONs, and an aggregate `REPORT.md`
+under each trajectory directory.
 
-### `tests/test_ekf_se3.py` — Task 2
+### Module-level tests (tests/)
 
-Purely synthetic, no data dependency.
+The originally-proposed module test files were built (with minor renames):
 
-| Test | Setup | Expected |
-|---|---|---|
-| `test_exp_log_roundtrip` | Random twist `ξ` in se(3) | `se3_log(se3_exp(ξ))` ≈ ξ |
-| `test_predict_grows_cov` | Static object, predict 10 steps | Cov trace monotonically increases by process noise |
-| `test_update_with_perfect_obs_shrinks_cov` | Predict then update with R=ε | Posterior cov ≈ ε, mean matches observation |
-| `test_update_with_large_R_is_noop` | Predict then update with R=10⁶·I | Posterior ≈ prior |
-| `test_manipulation_process_noise` | Same object, toggle manipulation phase | Q in grasping >> Q in idle stable >> Q in long-term static |
-| `test_beta_bernoulli_label` | Feed 10 high-score "cup" and 3 high-score "bowl" | label_belief["cup"] mean > 0.8; label_belief["bowl"] mean < 0.5 |
-| `test_shared_error_fusion_base_frame` | Mock SLAM drift: apply same `T_wb` error to prior and observation | Posterior cov does not shrink below `Σ_wb` lower bound |
-| `test_shared_error_fusion_world_frame` | Independent observations, different base poses | Posterior cov shrinks as expected |
+| Originally proposed | Actual file |
+|---|---|
+| `tests/test_ekf_se3.py` (Task 2) | `tests/test_ekf_se3.py` |
+| `tests/test_layer1_interface.py` (Task 1) | `tests/test_slam_interface.py` |
+| `tests/test_pose_graph.py` (Task 4) | `tests/test_factor_graph.py` |
+| `tests/test_adaptive_kernel.py` (Task 5) | `tests/test_adaptive_kernel.py` |
+| `tests/test_relation_factors.py` (Task 6) | `tests/test_relation_scores.py` + `tests/test_relation_trigger.py` |
+| `tests/test_orchestration.py` (Task 7) | `tests/test_orchestrator.py` + `tests/test_orchestrator_integration.py` |
 
-### `tests/test_layer1_interface.py` — Task 1
+Additional test surfaces that were not foreseen in the original plan and
+landed alongside the orchestrator/Bernoulli rewrite:
 
-Uses real trajectory RGBD + masks.
+* `tests/test_api.py` — public consumer API smoke tests.
+* `tests/test_bernoulli_degeneracy.py` — Bernoulli existence probability degenerate cases.
+* `tests/test_mask_cloud_filter.py` — pre-SLAM movable-pixel mask-out.
+* `tests/test_particle_pose.py` — particle-filter pose maintenance.
+* `tests/test_rbpf_state.py` — Rao-Blackwellized PF factorization.
+* `tests/test_three_backends.py` — Gaussian / RBPF / oracle parity sweep.
 
-| Test | Setup | Expected |
-|---|---|---|
-| `test_movable_mask_removed_from_depth` | Frame 0 depth + 5 object masks | Output depth has zeros at all mask pixels |
-| `test_slam_backend_protocol_signature` | Mock backend | Returns `PoseEstimate` with correct shapes |
-| `test_slam_cov_is_lower_bound_on_object_cov` | Run EKF for 20 frames with constant Σ_wb | Every object's world-frame cov trace ≥ trace(Σ_wb) |
+### Unit suite (tests/unit/)
 
-### `tests/test_pose_graph.py` — Task 4
+Eleven focused unit tests covering algorithmic primitives:
 
-Mix of synthetic and real data.
+* `test_association.py` — Hungarian gate decomposition, soft label-purity gate, `max_residual_m` Euclidean cap.
+* `test_centroid_update_psd.py` — covariance PSD invariant on centroid-only updates.
+* `test_gaussian_state.py` — Gaussian-backend Layer-2 state.
+* `test_grasp_owner.py` — gripper-geometry-based grasp-owner inference.
+* `test_gripper_state.py` — gripper FSM `{idle, grasping, holding, releasing}`.
+* `test_orchestrator_release.py` — phase gate for rigid-attachment predict during `releasing`.
+* `test_rbpf_state.py` — RBPF state factorization.
+* `test_relation_orchestrator.py` — online relation-graph throttling/EMA.
+* `test_self_merge_protected.py` — post-update Euclidean self-merge with same-label gate.
+* `test_visibility.py` — depth-ray-trace `visibility_p_v`.
+* `test_visualize_pid_to_oid.py` — visualizer pid→oid mapping.
 
-| Test | Setup | Expected |
-|---|---|---|
-| `test_single_object_graph_equals_ekf` | 1 object, 1 observation, no relations | Pose graph posterior ≈ EKF posterior within tolerance |
-| `test_containment_pulls_inconsistent_poses` | Place apple 10cm outside bowl, add "apple in bowl" factor | Apple's optimized pose is inside bowl |
-| `test_manipulation_factor_transports_contained_child` | Held bowl with apple in it; move bowl by 50cm | Apple's optimized pose moves by ≈50cm |
-| `test_fixed_camera_invariant` | Run optimization; check camera pose in output | Camera pose equals input `T_wb` exactly (not a free variable) |
-| `test_active_set_excludes_stale_objects` | 10 objects, only 2 recently observed | Only 2 + scene-graph-neighbors appear as variables |
-| `test_slam_uncertainty_inflates_observation_noise` | Same observation, increasing Σ_wb | Observation factor's effective noise grows monotonically |
-| `test_real_apple_bowl_optimization_converges` | Load 5 frames from `apple_bowl_2` | Optimization completes; residuals decrease monotonically |
+Run the unit suite with:
 
-### `tests/test_adaptive_kernel.py` — Task 5
-
-Purely synthetic.
-
-| Test | Setup | Expected |
-|---|---|---|
-| `test_alpha_near_2_for_gaussian_residuals` | Residuals ~ N(0, 1) | Estimated α ≈ 2 |
-| `test_alpha_negative_for_heavy_tails` | 95% residuals N(0,1), 5% residuals N(0, 100) | Estimated α < 0 |
-| `test_weight_monotone_in_residual` | Fixed α | Weight is non-increasing with \|r\| |
-| `test_weight_zero_for_extreme_outlier` | α = -10, r = 100c | Weight ≈ 0 |
-| `test_alpha_inlier_outlier_decision` | Inlier set + one clear outlier | Outlier receives ≥10× lower weight than inliers |
-
-### `tests/test_relation_factors.py` — Task 6
-
-Mix of synthetic and real.
-
-| Test | Setup | Expected |
-|---|---|---|
-| `test_compute_spatial_relations_returns_scores` | Two objects with 80% bbox overlap | `score` in returned relation equals overlap ratio |
-| `test_on_factor_zero_residual_when_stacked` | Two unit cubes, A bottom touches B top | Residual ≈ 0 |
-| `test_on_factor_positive_residual_when_floating` | A is 10cm above B top | Residual = 0.10 |
-| `test_in_factor_zero_when_centered` | A at B's center, A smaller | Residual ≈ 0 |
-| `test_in_factor_positive_when_outside` | A outside B's bbox | Residual > 0 |
-| `test_noise_grows_with_pose_covariance` | Same relation, increasing `cov_parent` | Factor noise trace grows |
-| `test_real_apple_in_bowl_detected` | Load `apple_bowl_2` frame 0 | "in" relation between apple and bowl with score > 0.3 |
-
-### `tests/test_orchestration.py` — Task 7
-
-End-to-end with real trajectory.
-
-| Test | Setup | Expected |
-|---|---|---|
-| `test_full_pipeline_runs_on_trajectory` | Load 20 frames of `apple_bowl_2` | Completes without exception, all objects have finite poses |
-| `test_held_object_pose_tracks_ee_during_holding` | Trajectory frames 50–300 | Held object's base-frame pose stays within 2cm of `T_be @ T_oe` |
-| `test_no_drift_after_release` | Trajectory frames 300–327 | Apple's world pose standard deviation over last 10 frames < 3cm |
-| `test_scene_graph_contains_apple_in_bowl` | At final frame | Relations contain "apple in bowl" with score > 0.5 |
-| `test_outer_loop_triggered_on_grasp_release` | Count outer-loop invocations | Invoked at grasp onset and at release, plus periodic triggers |
-| `test_ekf_absorbs_pose_graph_updates` | Before and after outer loop | EKF means match pose graph posteriors after absorption |
-
-### Shared fixtures
-
-Add to `tests/conftest.py`:
-
-```python
-@pytest.fixture
-def synthetic_pose():
-    """Random SE(3) pose with small covariance."""
-
-@pytest.fixture
-def mock_slam():
-    """Deterministic fake SlamBackend returning fixed (T_wb, Σ_wb)."""
-
-@pytest.fixture
-def apple_bowl_frames(n_frames=20):
-    """Load first n_frames of apple_bowl_2 with RGB, depth, camera poses, detections."""
-
-@pytest.fixture
-def grasped_bowl_with_apple():
-    """Synthetic: 2-object scene with bowl held by EE and apple in bowl, positions known."""
+```bash
+conda run -n ocmp_test python -m pytest tests/unit -q
 ```
 
-Fixtures are reused across test files to keep the data-loading path consistent with `tests/test_api.py`.
+### End-to-end visualization
+
+`tests/visualize_ekf_tracking.py` drives the full Bernoulli-EKF pipeline on a
+trajectory and renders per-frame and aggregate views. Key CLI flags:
+
+* `--trajectory {apple_drop|apple_in_the_tray|apple_to_cabinate|apple_to_cabinate_look}`
+* `--max-frame N` (exclusive upper bound)
+* `--start N`, `--step N` (frame range subsampling)
+* `--pose-method {centroid|icp_chain|icp_anchor|icp_chain_strict|icp_anchor_strict}` (default `icp_chain`)
+* `--out-subdir`, `--state-subdir`
+* `--no-png`, `--no-mp4`
+* `--fps` (default 10)
+
+Per-trajectory aggregate reports are written to
+`tests/visualization_pipeline/<trajectory>/REPORT.md`. A top-level
+`tests/visualization_pipeline/REPORT.md` summarises match rates, PSD-min,
+and self-merge counts across all four trajectories.
 
 ---
 
 ## Task 1 — Fix Layer 1/Layer 2 separation
+
+> **Implemented in:** `pose_update/slam_interface.py` defines the
+> `SlamBackend` protocol consumed by `pose_update/orchestrator.py`. The
+> legacy `data_demo.py:530` and `realtime_app.py:745` paths still call
+> `pose_update/camera_pose_refiner.py::refine_camera_pose` and have not
+> migrated; track separately.
 
 **Goal:** Movable objects must not poison SLAM input.
 
@@ -395,6 +404,14 @@ Fixtures are reused across test files to keep the data-loading path consistent w
 ---
 
 ## Task 2 — Per-object EKF on SE(3)
+
+> **Implemented in:** `pose_update/ekf_se3.py`. Public functions: `se3_exp`,
+> `se3_log`, `se3_adjoint`, `ekf_predict`, `ekf_update`,
+> `ekf_update_base_frame` (Task 3), `compose_observation_noise`,
+> `pose_entropy`, `pose_is_uncertain`, `process_noise_for_phase`,
+> `update_label_belief`, `huber_weight`, `saturate_covariance`. State on
+> `scene/scene_object.py`: `pose_cov` (6×6), `label_belief` (Beta-Bernoulli per
+> label), property-backed `pose_uncertain` derived from `pose_entropy`.
 
 **Goal:** Replace the deterministic `pose_cur` + boolean `pose_uncertain` with a proper posterior `(T_o, Σ_o)`.
 
@@ -417,6 +434,9 @@ Fixtures are reused across test files to keep the data-loading path consistent w
 
 ## Task 3 — Base-frame fusion for held objects
 
+> **Implemented in:** `pose_update/ekf_se3.py::ekf_update_base_frame`. Folded
+> into Task 2 as a separate update path selected per phase.
+
 **Goal:** Prevent Kalman overconfidence when the EE prior and the camera observation share `T_wb`.
 
 **Changes:**
@@ -432,6 +452,14 @@ Fixtures are reused across test files to keep the data-loading path consistent w
 ---
 
 ## Task 4 — Joint pose graph over movable objects
+
+> **Implemented in:** `pose_update/factor_graph.py::PoseGraphOptimizer`
+> (class API — the `optimize_frame()` function originally proposed below
+> was never built). Wired in via the orchestrator slow tier:
+> `pose_update/orchestrator.py:39, 624` and
+> `pose_update/orchestrator_gaussian.py`. Triggered by `TriggerConfig`
+> (grasp/release/new-object events + 0.10 m residual threshold + 90-frame
+> periodic safety net).
 
 **Goal:** Jointly optimize all movable object poses with scene graph relations as constraints. The camera pose is a fixed parameter, not a variable.
 
@@ -456,6 +484,11 @@ Fixtures are reused across test files to keep the data-loading path consistent w
 
 ## Task 5 — Adaptive robust kernel
 
+> **Implemented in:** `pose_update/adaptive_kernel.py` (Barron generalized
+> loss with truncated partition; alternating α minimization). Used inside
+> `PoseGraphOptimizer`; not used in the per-object EKF (residual count too
+> small for α to be meaningful).
+
 **Goal:** Automatically downweight outlier observations and wrong scene graph relations.
 
 **Changes:**
@@ -471,6 +504,12 @@ Fixtures are reused across test files to keep the data-loading path consistent w
 ---
 
 ## Task 6 — Scene graph relation factors
+
+> **Implemented in:** `pose_update/factor_graph.py::relation_residual` plus
+> the `RelationEdge` dataclass. Online relation-graph orchestration
+> (REST/LLM backends, throttling, EMA smoothing) is in
+> `pose_update/relation_orchestrator.py`; transitive-closure expansion of
+> the held set under "in"/"on" edges is in `pose_update/relation_utils.py`.
 
 **Goal:** Turn scene graph relations from downstream annotations into first-class optimization constraints.
 
@@ -490,6 +529,16 @@ Fixtures are reused across test files to keep the data-loading path consistent w
 
 ## Task 7 — Two-tier orchestration
 
+> **Implemented in:** `pose_update/orchestrator.py::TwoTierOrchestrator`
+> (Bernoulli/RBPF backend) and `pose_update/orchestrator_gaussian.py`
+> (Gaussian backend). Both share the slow tier
+> (`PoseGraphOptimizer`), the trigger policy (`TriggerConfig`), and the
+> SLAM protocol (`SlamBackend`). The `BernoulliConfig` dataclass exposes
+> 42+ knobs covering association mode, gates, label penalties, birth
+> gating, dedup, self-merge, ICP fallback, and relation triggers.
+> **Not yet wired into `data_demo.py` / `realtime_app.py`** — those still
+> run the legacy sequential pipeline.
+
 **Goal:** Wire the fast EKF loop and the slow pose graph loop into a coherent pipeline.
 
 **Changes:**
@@ -508,12 +557,12 @@ Fixtures are reused across test files to keep the data-loading path consistent w
 ## Task 8 — Verification
 
 **Changes:**
-- Extend `tests/visualize_full.py` to show per-object covariance ellipses in the top-down panel.
-- Run on the `apple_bowl_2` trajectory with and without each task enabled. Compare:
+- Extend `tests/visualize_ekf_tracking.py` (the headline driver) to show per-object covariance ellipses in the top-down panel.
+- Run on the `apple_drop`, `apple_in_the_tray`, `apple_to_cabinate`, and `apple_to_cabinate_look` trajectories with and without each task enabled. Compare:
   - Reconstruction drift during HOLDING.
   - Scene graph stability across frames.
   - Convergence time after release.
-- Add unit tests for the EKF (Task 2) and the factor graph (Task 4) using the existing `tests/test_api.py` pattern.
+- Add unit tests for the EKF (Task 2) and the factor graph (Task 4) using the existing `tests/test_api.py` pattern. **(Done — see `tests/test_ekf_se3.py` and `tests/test_factor_graph.py`.)**
 
 **Depends on:** all other tasks.
 **Estimated effort:** ~80 lines added to visualization + ~150 lines of tests.

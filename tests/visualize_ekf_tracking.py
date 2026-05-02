@@ -61,6 +61,9 @@ from pose_update.icp_pose import (
     PoseEstimator, centroid_cam_from_mask, _back_project,
 )
 from pose_update.obs_chain import ChainStore
+from pose_update.gravity_predict import predict_landing_pose
+from pose_update.object_dynamics import lookup_dynamics
+from pose_update.voxel_observability import VoxelObservability
 from pose_update.orchestrator import (
     BernoulliConfig, birth_admissible, _PendingBirth, RelationFilter,
 )
@@ -439,6 +442,17 @@ class InstrumentedTracker:
             }
             T_world = T_wb @ pe.T
 
+            # World-frame collapsed view: composes T_wb · T_bo and lifts
+            # Σ_bo through Ad(T_bo^-1) Σ_wb Ad(T_bo^-1)^T + Σ_bo, so the
+            # ellipse rendered at world-frame position uses world-frame
+            # tangent. Falls back to None when SLAM hasn't been ingested.
+            try:
+                pe_world = self.state.collapsed_object_world(oid)
+            except Exception:
+                pe_world = None
+            cov_world = (pe_world.cov.copy()
+                         if pe_world is not None else None)
+
             # Chain-smoothed world-frame estimate (canonical).
             T_world_chain = None
             cov_world_chain = None
@@ -458,6 +472,7 @@ class InstrumentedTracker:
                 "T": pe.T.copy(),                # BASE frame
                 "cov": pe.cov.copy(),            # BASE frame tangent
                 "T_world": T_world.copy(),       # filter composed (Markov)
+                "cov_world": cov_world,          # WORLD-frame tangent, or None
                 "T_world_chain": (T_world_chain.copy()
                                     if T_world_chain is not None else None),
                 "cov_world_chain": (cov_world_chain.copy()
@@ -703,8 +718,16 @@ class InstrumentedTracker:
         # rigid-attachment branch below (μ ← ΔT_bg · μ). Applying u_k to
         # held tracks first would compose to `ΔT_bg · u_k · μ`, which is
         # wrong for the held kinematics (`T_bo = T_bg · T_go`).
+        # Tracks not observed last frame keep their cov_bo at the
+        # keyframe value (plan §C.1) -- only the deterministic mean
+        # update applies, so world uncertainty grows solely via the
+        # current Σ_wb-lever in collapsed_object_world.
+        unobserved_oids = {oid for oid, fso
+                           in self.frames_since_obs.items()
+                           if fso > 0 and oid in self.state.objects}
         self.state.predict_static(Q_fn, P_max=self.cfg.P_max,
-                                   skip_oids=held_oids)
+                                   skip_oids=held_oids,
+                                   unobserved_oids=unobserved_oids)
 
         # Branch B: held / manipulation-set tracks -- u_k = ΔT_bg.
         # Per-oid Q: the SEED (directly-grasped object) gets the
@@ -863,6 +886,8 @@ class InstrumentedTracker:
                 G_out_trans=self.cfg.G_out_trans,
                 G_out_rot=self.cfg.G_out_rot,
                 cost_d2_mode=self.cfg.cost_d2_mode,
+                max_residual_m=getattr(
+                    self.cfg, "max_residual_m", None),
             )
 
         # 3b. FINE measurement: for every matched (track, det) pair,
@@ -1721,7 +1746,13 @@ def _plot_topdown(ax,
     # to the loop-closure-aware chain.
     for oid, tr in tracks.items():
         T = tr.get("T_world", tr["T"])
-        cov = tr["cov"]
+        # Prefer world-frame covariance when present so the ellipse axes
+        # are in world-x/world-y instead of body-x/body-y. Falls back to
+        # the base-frame cov when SLAM has not yet been ingested (first
+        # frame) or `collapsed_object_world` returned None for any reason.
+        cov = tr.get("cov_world")
+        if cov is None:
+            cov = tr["cov"]
         r_ex = tr["r"]
         x, y = float(T[0, 3]), float(T[1, 3])
         col = _palette_color_f(oid)
@@ -1732,12 +1763,23 @@ def _plot_topdown(ax,
         # Uncertainty ellipse (3sigma in xy).
         cov_xy = cov[:2, :2]
         try:
+            # Standard 3σ ellipse: matplotlib's `width` is the diameter
+            # along the LOCAL x-axis BEFORE the `angle` rotation. To put
+            # the visible major axis along the larger eigenvector, we
+            # need width=major-diameter AND angle=direction-of-major.
+            # `np.linalg.eigh` returns ascending eigenvalues, so the
+            # major eigenvector is `v_eig[:, 1]`; we sort descending here
+            # so width corresponds to it unambiguously.
             w_eig, v_eig = np.linalg.eigh(cov_xy)
             w_eig = np.clip(w_eig, 1e-10, None)
-            width, height = 2 * 3 * np.sqrt(w_eig)
-            angle = np.degrees(np.arctan2(v_eig[1, 1], v_eig[0, 1]))
+            order = np.argsort(w_eig)[::-1]
+            w_eig = w_eig[order]
+            v_eig = v_eig[:, order]
+            width = 2 * 3 * float(np.sqrt(w_eig[0]))    # major (along angle)
+            height = 2 * 3 * float(np.sqrt(w_eig[1]))   # minor (perpendicular)
+            angle = np.degrees(np.arctan2(v_eig[1, 0], v_eig[0, 0]))
             ell = mpatches.Ellipse(
-                (x, y), width=float(width), height=float(height),
+                (x, y), width=width, height=height,
                 angle=float(angle),
                 fill=False, edgecolor=col, lw=1.0, linestyle="--",
                 alpha=0.7, zorder=2,
@@ -2058,6 +2100,10 @@ def _track_to_jsonable(tr: Dict[str, Any]) -> Dict[str, Any]:
                 float(tr["T"][2, 3])],
         "tr_cov": float(np.trace(tr["cov"])),
     }
+    cov_world = tr.get("cov_world")
+    if cov_world is not None:
+        out["cov_world"] = cov_world.tolist() if hasattr(
+            cov_world, "tolist") else cov_world
     T_world = tr.get("T_world")
     if T_world is not None:
         out["T_world"] = T_world.tolist() if hasattr(T_world, "tolist") \
@@ -2162,6 +2208,7 @@ def _dump_frame_json(out_path: str,
         "self_merge_protected_pairs": dbg.get("self_merge_protected_pairs", []),
         "visibility": {int(o): float(v)
                         for o, v in dbg.get("visibility", {}).items()},
+        "gravity_predict": dbg.get("gravity_predict"),
     }
 
     with open(out_path, "w") as f:
@@ -2219,14 +2266,24 @@ def _cov_ellipse_xy(ax, mean_xy, cov_xy, color, n_std=2.0, lw=1.0,
     # Permute to (y, x) basis: P = [[0,1],[1,0]]; cov_p = P cov P^T.
     cov_p = np.array([[cov[1, 1], cov[1, 0]],
                       [cov[0, 1], cov[0, 0]]], dtype=np.float64)
+    # Sort eigenvalues DESCENDING so width=major and angle=direction-of-major
+    # remain consistent with `mpatches.Ellipse(width, height, angle)` semantics
+    # ("width is the diameter along the LOCAL x-axis BEFORE rotation"). The
+    # ascending default from `np.linalg.eigh` would put the smaller sqrt in
+    # `width` while `angle` aligned with the larger eigvec → ellipse rendered
+    # 90° rotated.
     vals, vecs = np.linalg.eigh(cov_p)
     vals = np.clip(vals, 0.0, None)
-    width, height = 2.0 * n_std * np.sqrt(vals)
-    angle = np.degrees(np.arctan2(vecs[1, -1], vecs[0, -1]))
+    order = np.argsort(vals)[::-1]
+    vals = vals[order]
+    vecs = vecs[:, order]
+    width = 2.0 * n_std * float(np.sqrt(vals[0]))
+    height = 2.0 * n_std * float(np.sqrt(vals[1]))
+    angle = np.degrees(np.arctan2(vecs[1, 0], vecs[0, 0]))
     # Centre in plot coords = (world_y, world_x).
     ell = mpatches.Ellipse(xy=(float(mean_xy[1]), float(mean_xy[0])),
                            width=max(width, 1e-4),
-                           height=max(height, 1e-4), angle=angle,
+                           height=max(height, 1e-4), angle=float(angle),
                            facecolor=color, edgecolor=color,
                            alpha=alpha, lw=lw, zorder=3)
     ax.add_patch(ell)
@@ -2399,7 +2456,11 @@ def _plot_step1_predict(ax, dbg, T_wb):
         ax.scatter([y], [x], s=50, color=col,
                    edgecolors="white", linewidths=1.0, zorder=5)
         tr = dbg["post_predict_tracks"][oid]
-        cov = np.asarray(tr["cov"])[:2, :2]
+        # Plot is world-frame; prefer the world-tangent cov when present.
+        cov_full = tr.get("cov_world")
+        if cov_full is None:
+            cov_full = tr["cov"]
+        cov = np.asarray(cov_full)[:2, :2]
         _cov_ellipse_xy(ax, (x, y), cov, color=col, n_std=2.0, alpha=0.18)
         ax.text(y, x, f"  {oid}", color=col, fontsize=7,
                 va="center", ha="left", zorder=6)
@@ -2409,11 +2470,11 @@ def _build_pid_to_oid(dbg, dets_with_pose) -> Tuple[Dict[Any, int], set]:
     """Return (pid → oid map, held_set) from this frame's dbg + the
     POST-suppression detections (``dets_with_pose``).
 
-    The map is built from `dbg["assoc"]["match"]` plus
-    `det_indices_in_assoc`. Both index `dets_with_pose`, NOT the raw
-    perception list — passing raw `detections` here used to mis-map
-    pids whenever subpart-suppression dropped a det earlier in the
-    list. Held set comes from `dbg["held_oids_used"]`
+    The map is built from `dbg["assoc"]["match"]`, whose values are
+    GLOBAL indices into `dets_with_pose` (the producer at orchestrator
+    line 928 already remaps Hungarian's local column index through
+    `local_to_global`; the LOCAL form is preserved separately under
+    `match_local`). Held set comes from `dbg["held_oids_used"]`
     (relation-expanded) or `dbg["gripper_state"]["held_obj_id"]`.
     """
     pid_to_oid: Dict[Any, int] = {}
@@ -2421,18 +2482,18 @@ def _build_pid_to_oid(dbg, dets_with_pose) -> Tuple[Dict[Any, int], set]:
     if dbg is None:
         return pid_to_oid, held_set
     assoc = dbg.get("assoc") or dbg.get("association") or {}
-    det_idx_in_assoc = assoc.get("det_indices_in_assoc") or []
     match = assoc.get("match") or {}
-    for oid_key, l_local in match.items():
+    n_total = len(dets_with_pose)
+    for oid_key, l_global in match.items():
         try:
-            l_local = int(l_local)
+            l_g = int(l_global)
             oid_int = int(oid_key)
         except (TypeError, ValueError):
             continue
-        if 0 <= l_local < len(det_idx_in_assoc):
-            l_global = int(det_idx_in_assoc[l_local])
-            if 0 <= l_global < len(dets_with_pose):
-                pid_to_oid[dets_with_pose[l_global].get("id")] = oid_int
+        if 0 <= l_g < n_total:
+            pid = dets_with_pose[l_g].get("id")
+            if pid is not None:
+                pid_to_oid[pid] = oid_int
     gs = dbg.get("gripper_state") or {}
     h = gs.get("held_obj_id")
     if h is not None:
@@ -3350,6 +3411,19 @@ def main():
     )
     tracker = InstrumentedTracker(K_DEFAULT, cfg, pose_method=args.pose_method)
 
+    # ── voxel observability (for gravity-aware predict at release) ──
+    # Coarse 5 cm grid covering 5 m × 5 m × 3 m around origin; sufficient
+    # for the apple_drop / apple_in_the_tray / apple_to_cabinate scenes.
+    voxel_obs = VoxelObservability(
+        voxel_size_m=0.05,
+        workspace_aabb=((-2.5, -2.5, -1.0), (2.5, 2.5, 2.0)),
+        n_min_hit=2, n_min_pass=3,
+    )
+    # Phase-transition tracking for the gravity-predict hook.
+    prev_phase = "idle"
+    prev_held: Optional[int] = None
+    gravity_predict_log: List[Dict[str, Any]] = []
+
     # ── per-track r(t) history ──
     r_history: Dict[int, List[Tuple[int, float]]] = {}
 
@@ -3370,6 +3444,20 @@ def main():
 
         T_wb = slam_poses[idx]
         T_bc_now = T_bc_map.get(idx) if T_bc_map is not None else None
+
+        # ── Voxel observability: integrate this frame's depth ─────
+        # T_cw maps camera-frame points to world: T_wc = T_wb @ T_bc.
+        T_bc_for_vox = T_bc_now if T_bc_now is not None else np.eye(4)
+        try:
+            voxel_obs.integrate_depth(
+                depth=depth.astype(np.float32),
+                K=K_DEFAULT,
+                T_cw=np.asarray(T_wb, dtype=np.float64) @ np.asarray(T_bc_for_vox, dtype=np.float64),
+                max_range_m=3.0,
+                subsample=4,
+            )
+        except Exception as e:
+            print(f"[WARN] voxel_obs.integrate_depth failed at fr {idx}: {e}")
         T_bg_now = T_bg_map.get(idx) if T_bg_map is not None else None
         w_now = gripper_w_map.get(idx) if gripper_w_map is not None else None
         joints_now = joints_map.get(idx) if joints_map is not None else None
@@ -3384,6 +3472,15 @@ def main():
             detections=detections, depth=depth, K=K_DEFAULT,
             T_bc=T_bc_now, joints=joints_now)
         held_seed = gripper_state.get("held_obj_id")
+        # Releasing: the gripper just opened, so the held object has
+        # been let go. Skip rigid-attachment predict during this
+        # transition window — otherwise the released object continues
+        # to ride the base for `min_transition_frames` until the FSM
+        # reaches `idle` and clears `held_obj_id`. The FSM keeps the
+        # id internally so events / timeline still log "release at
+        # frame N for oid X".
+        if gripper_state.get("phase") == "releasing":
+            held_seed = None
 
         # Maybe re-run the relation backend (throttled by trigger gate).
         # Build per-detection-idx → tracker-oid map from the live tracks'
@@ -3446,6 +3543,68 @@ def main():
         # expansion still finds the right edges.
         relation_pipeline.remap_after_merges(dbg.get("self_merges", []))
         dbg["gripper_state"] = dict(gripper_state)
+
+        # ── Gravity-aware predict at the release transition ──────
+        # Detect the FSM exiting the {holding, releasing} window. When
+        # that happens, replace the just-released oid's mean + cov with
+        # the post-fall prediction (one-shot). voxel_obs supplies the
+        # supporting surface; the parametric model in
+        # pose_update.gravity_predict handles bounce/roll dispersion.
+        cur_phase = gripper_state.get("phase", "idle")
+        if (prev_phase in ("holding", "releasing")
+                and cur_phase not in ("holding", "releasing")
+                and prev_held is not None
+                and prev_held in tracker.state.objects):
+            try:
+                pe_w = tracker.state.collapsed_object_world(int(prev_held))
+                if pe_w is not None:
+                    label = tracker.object_labels.get(int(prev_held))
+                    dyn = lookup_dynamics(label)
+                    # Live-object overlay: every other live oid contributes.
+                    other_voxels = []
+                    for other_oid, other_pe in (
+                            tracker.state.collapsed_objects_world() or {}).items():
+                        if other_oid == prev_held:
+                            continue
+                        T_o = other_pe.T
+                        other_dyn = lookup_dynamics(
+                            tracker.object_labels.get(int(other_oid)))
+                        other_voxels.append((
+                            float(T_o[0, 3]), float(T_o[1, 3]),
+                            float(T_o[2, 3]), float(other_dyn.radius_m)))
+                    T_land, P_land, info = predict_landing_pose(
+                        T_release=pe_w.T,
+                        P_release=pe_w.cov,
+                        voxel_obs=voxel_obs,
+                        dyn=dyn,
+                        workspace_floor_z=-1.0,
+                        live_object_voxels=other_voxels,
+                    )
+                    # Write back into base-frame state. The EKF stores
+                    # objects in base frame; convert T_land back via T_wb.
+                    obj = tracker.state.objects.get(int(prev_held))
+                    if obj is not None:
+                        T_wb_arr = np.asarray(T_wb, dtype=np.float64)
+                        obj.mu_bo = np.linalg.inv(T_wb_arr) @ T_land
+                        obj.cov_bo = P_land.copy()
+                    log_entry = info.as_dict()
+                    log_entry["oid"] = int(prev_held)
+                    log_entry["frame"] = int(idx)
+                    log_entry["label"] = label
+                    gravity_predict_log.append(log_entry)
+                    dbg["gravity_predict"] = log_entry
+            except Exception as e:
+                print(f"[WARN] gravity_predict failed at fr {idx}: {e}")
+        # Update phase / held tracking for next iteration. prev_held is
+        # the most-recently-known held oid: we keep the last non-None
+        # value seen so the release-transition handler can identify
+        # which oid was just dropped (the FSM clears held_obj_id when
+        # it returns to idle).
+        prev_phase = cur_phase
+        held_now = gripper_state.get("held_obj_id")
+        if held_now is not None:
+            prev_held = int(held_now)
+
         # Expose the expanded held set + the relation snapshot for the
         # state JSON / mask panel highlight.
         dbg["held_oids_used"] = sorted(int(o) for o in held_oids)

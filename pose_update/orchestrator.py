@@ -51,6 +51,8 @@ from pose_update.bernoulli import (
 )
 from pose_update.visibility import visibility_p_v
 from pose_update.relation_client import RelationClient, build_relation_client
+from pose_update.gravity_predict import predict_landing_pose
+from pose_update.object_dynamics import lookup_dynamics
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -211,6 +213,12 @@ class BernoulliConfig:
     G_in_trans: float = 7.815        # chi^2_3(0.95) -- Huber inner gate (trans block)
     G_in_rot: float = 7.815          # chi^2_3(0.95) -- Huber inner gate (rot block)
     cost_d2_mode: str = "full"       # 'full' | 'trans' | 'sum'
+    # Hard absolute-distance gate on the world-frame translation
+    # residual ‖ν[:3]‖ (metres). Catches the inflated-covariance
+    # pathology where the chi² gate becomes meaningless during long
+    # miss runs (a 0.8 m residual against σ ≈ 0.4 m gives d² ≈ 17,
+    # under any chi² gate). Default 0.30 m. Set to None to disable.
+    max_residual_m: Optional[float] = 0.30
     # Per-axis floor on P_bo (passed into GaussianState). Prevents the
     # EKF posterior from shrinking below realistic per-frame perception
     # jitter. None = no floor (paper baseline).
@@ -333,6 +341,13 @@ class BernoulliConfig:
     relation_on_grasp: bool = True
     relation_on_release: bool = True
     relation_on_new_object: bool = True
+    # Gravity-aware one-shot predict at the release transition. When
+    # True and `voxel_obs` is set on the orchestrator, the EKF mean +
+    # covariance for the just-released object are replaced by the
+    # post-fall prediction from `pose_update.gravity_predict`. Set
+    # `False` to fall back to the existing static-Q-only predict.
+    gravity_predict: bool = True
+    workspace_floor_z: float = -1.0
 
     @classmethod
     def degeneracy(cls, **overrides) -> "BernoulliConfig":
@@ -554,6 +569,31 @@ class TwoTierOrchestrator:
         frame_count, last_opt_frame, last_state — orchestrator bookkeeping.
     """
 
+    # Phases during which a manipulation-set member rides the gripper
+    # rigidly. `releasing` is excluded — the held object has been let
+    # go even though the FSM still carries `held_obj_id` until it
+    # reaches `idle`.
+    _RIGID_PHASES: Set[str] = frozenset(("grasping", "holding"))
+
+    @staticmethod
+    def should_apply_rigid(
+        T_bg: Optional[np.ndarray],
+        prev_T_bg: Optional[np.ndarray],
+        manipulation_set: Set[int],
+        phase: str,
+    ) -> bool:
+        """Predicate for the rigid-attachment branch of the fast tier.
+
+        Rigid attach is applied iff (a) we have two consecutive
+        proprio samples to form ΔT_bg, (b) some object is in the
+        manipulation set, AND (c) the gripper is actually closed
+        around the object (phase in {grasping, holding}).
+        """
+        return (T_bg is not None
+                and prev_T_bg is not None
+                and bool(manipulation_set)
+                and phase in TwoTierOrchestrator._RIGID_PHASES)
+
     # Default loose init covariance for a newly-detected object (same
     # magnitude the legacy orchestrator used).
     # Birth covariance: σ_trans = 0.05 m = 5 cm per axis, σ_rot = 0.05 rad ≈ 2.9°.
@@ -608,6 +648,13 @@ class TwoTierOrchestrator:
         self.object_first_seen: Dict[int, int] = {}
         self.frames_since_obs: Dict[int, int] = {}
         self.T_oe: Dict[int, Optional[np.ndarray]] = {}
+
+        # Gravity-aware predict on release. The driver constructs and
+        # populates `voxel_obs` (a `pose_update.voxel_observability.
+        # VoxelObservability`) per frame; when None, the gravity hook
+        # short-circuits and behaviour is identical to the legacy path.
+        self.voxel_obs = None
+        self._gravity_predict_log: List[Dict[str, Any]] = []
 
         # Bernoulli-EKF per-track state (only populated when bernoulli != None):
         #   existence r^(i)_{k|k} ; last-matched SAM2 tracklet id tau^(i).
@@ -802,6 +849,13 @@ class TwoTierOrchestrator:
         else:
             self._fast_tier(detections, gripper_state, T_ec, T_bg)
 
+        # ── 2b. Gravity-aware one-shot predict at release transition ───
+        # Detect oids transitioning out of {holding, releasing}; for each,
+        # replace the EKF mean + covariance with the post-fall prediction
+        # from pose_update.gravity_predict. No-ops when voxel_obs is None
+        # or when bernoulli.gravity_predict is False.
+        self._maybe_gravity_predict(gripper_state)
+
         # ── 3. Scene graph relations (on the collapsed view) ───────────
         # Only fire the relation detector on a periodic tick or on key
         # events (grasp / release / new track). Between firings we keep the
@@ -877,9 +931,8 @@ class TwoTierOrchestrator:
         # have two proprioception samples to form ΔT_gripper_b. Otherwise
         # we fall back to the legacy phase-aware inflated-Q predict for
         # them. Either way, each object is predicted exactly once.
-        apply_rigid = (T_bg is not None
-                       and self._prev_T_bg is not None
-                       and bool(manipulation_set))
+        apply_rigid = self.should_apply_rigid(
+            T_bg, self._prev_T_bg, manipulation_set, phase)
         delta_T_grip_b = (T_bg @ np.linalg.inv(self._prev_T_bg)
                           if apply_rigid else None)
 
@@ -982,9 +1035,8 @@ class TwoTierOrchestrator:
 
         manipulation_set = self._get_manipulation_set(held_id)
 
-        apply_rigid = (T_bg is not None
-                       and self._prev_T_bg is not None
-                       and bool(manipulation_set))
+        apply_rigid = self.should_apply_rigid(
+            T_bg, self._prev_T_bg, manipulation_set, phase)
         delta_T_grip_b = (T_bg @ np.linalg.inv(self._prev_T_bg)
                           if apply_rigid else None)
 
@@ -1062,6 +1114,7 @@ class TwoTierOrchestrator:
                 G_out_trans=cfg.G_out_trans,
                 G_out_rot=cfg.G_out_rot,
                 cost_d2_mode=cfg.cost_d2_mode,
+                max_residual_m=cfg.max_residual_m,
             )
 
         # ── Visibility for missed tracks (eq:pv) ────────────────────────
@@ -1612,6 +1665,7 @@ class TwoTierOrchestrator:
                 G_out_trans=cfg.G_out_trans,
                 G_out_rot=cfg.G_out_rot,
                 cost_d2_mode=cfg.cost_d2_mode,
+                max_residual_m=cfg.max_residual_m,
             )
 
         # Remap local detection indices back to the full dets_coarse space.
@@ -2268,6 +2322,64 @@ class TwoTierOrchestrator:
     # --------------------------------------------------------------- #
     #  Trigger policy
     # --------------------------------------------------------------- #
+
+    def _maybe_gravity_predict(self,
+                                gripper_state: Dict[str, Any]) -> None:
+        """Replace the EKF mean + covariance for a just-released object
+        with the post-fall prediction.
+
+        Triggered when last_phase ∈ {holding, releasing} and cur_phase is
+        not — i.e. the FSM exits the manipulation window. The just-released
+        oid is taken from `last_state["held_obj_id"]`. No-ops when:
+            * the bernoulli backend is not active,
+            * `BernoulliConfig.gravity_predict` is False,
+            * `self.voxel_obs` is None,
+            * the oid no longer exists in the filter (e.g. pruned mid-release).
+        """
+        if self.bernoulli is None or not getattr(
+                self.bernoulli, "gravity_predict", False):
+            return
+        if self.voxel_obs is None:
+            return
+        last_phase = self.last_state.get("phase", "idle")
+        cur_phase = gripper_state.get("phase", "idle")
+        manip = ("holding", "releasing")
+        if not (last_phase in manip and cur_phase not in manip):
+            return
+        just_released = self.last_state.get("held_obj_id")
+        if just_released is None:
+            return
+        pe = self.state.collapsed_object(just_released)
+        if pe is None:
+            return
+        label = self.object_labels.get(just_released)
+        dyn = lookup_dynamics(label)
+        # Live-object overlay: every other tracked oid contributes
+        # (x, y, z, radius) for the raycast collision check.
+        other_voxels = []
+        for oid, pe_o in self.state.collapsed_objects().items():
+            if oid == just_released:
+                continue
+            T = pe_o.T
+            other_dyn = lookup_dynamics(self.object_labels.get(oid))
+            other_voxels.append(
+                (float(T[0, 3]), float(T[1, 3]), float(T[2, 3]),
+                 float(other_dyn.radius_m)))
+        T_land, P_land, info = predict_landing_pose(
+            T_release=pe.T,
+            P_release=pe.cov,
+            voxel_obs=self.voxel_obs,
+            dyn=dyn,
+            workspace_floor_z=float(self.bernoulli.workspace_floor_z),
+            live_object_voxels=other_voxels,
+        )
+        ok = self.state.overwrite_object_pose(just_released, T_land, P_land)
+        log_entry = info.as_dict()
+        log_entry["oid"] = int(just_released)
+        log_entry["frame"] = int(self.frame_count)
+        log_entry["written_back"] = bool(ok)
+        log_entry["label"] = label
+        self._gravity_predict_log.append(log_entry)
 
     def _should_recompute_relations(self,
                                     gripper_state: Dict[str, Any]) -> bool:

@@ -277,14 +277,54 @@ The three papers all reduce to one mechanism: **a per-object weight that modulat
 
 ---
 
+## Implementation Pointers (2026-04-30)
+
+| Concept in this document | Source file |
+|---|---|
+| Layer 1 SLAM protocol | `pose_update/slam_interface.py` (`SlamBackend`) |
+| Layer 2 movable-object tracker (Bernoulli/RBPF) | `pose_update/orchestrator.py::TwoTierOrchestrator`; Gaussian variant in `orchestrator_gaussian.py` |
+| Per-object EKF on SE(3), composed observation noise | `pose_update/ekf_se3.py` (`ekf_predict`, `ekf_update`, `compose_observation_noise`, `huber_weight`, `saturate_covariance`, `pose_entropy`) |
+| Base-frame fusion for held / grasping / releasing | `pose_update/ekf_se3.py::ekf_update_base_frame` |
+| Phase-dependent process noise | `pose_update/ekf_se3.py::process_noise_for_phase`; phase tracked by `pose_update/gripper_state.py` |
+| Beta-Bernoulli label belief | `pose_update/ekf_se3.py::update_label_belief`; state on `scene/scene_object.py::label_belief` |
+| Joint pose graph (slow tier) | `pose_update/factor_graph.py::PoseGraphOptimizer` |
+| Adaptive Barron robust kernel | `pose_update/adaptive_kernel.py` |
+| Scene-graph relation factors ("in"/"on"/"contact") | `pose_update/factor_graph.py::relation_residual`, `RelationEdge` |
+| Online relation-graph orchestration | `pose_update/relation_orchestrator.py`, `relation_utils.py` |
+| Visibility predicate via depth ray-trace | `pose_update/visibility.py::visibility_p_v` |
+| Bernoulli existence probability + birth gating | `pose_update/orchestrator.py`, `pose_update/birth_gating.py` |
+| Pre-association voxel dedup | `pose_update/det_dedup.py` |
+| Trigger policy (event + residual + periodic) | `pose_update/orchestrator.py::TriggerConfig` |
+
+**Gap:** `data_demo.py:530` and `realtime_app.py:745` still call the legacy
+`pose_update/camera_pose_refiner.py::refine_camera_pose` rather than
+constructing a `TwoTierOrchestrator`. The migration is tracked separately.
+
 ## Open Questions
 
-1. **iSAM2 vs full re-solve.** For the outer loop, iSAM2 is the natural choice for incremental optimization, but adds dependency complexity. A fixed-lag smoother (only optimize the last N frames' worth of factors) might be sufficient for our application. Decision pending.
+1. ~~**iSAM2 vs full re-solve.**~~ **DECIDED (2026-04-30):** full re-solve via
+   Levenberg-Marquardt inside `pose_update/factor_graph.py::PoseGraphOptimizer`.
+   The orchestrator's trigger gate keeps the outer loop infrequent enough that
+   iSAM2 was not necessary.
 
-2. **Active set policy.** The exact rule for which objects enter the active set per outer-loop run needs tuning. Current proposal: recently-observed + manipulated + scene-graph-neighbors of those, with all others as fixed priors.
+2. ~~**Active set policy.**~~ **IMPLEMENTED:** the trigger gate in
+   `TwoTierOrchestrator` recomputes when an event fires (grasp, release, new
+   object, large residual) or on the periodic safety-net tick; the active set
+   at trigger time is the recently-observed + manipulated tracks. Tuning is
+   ongoing but the policy itself is in place.
 
-3. **Triggering frequency for the outer loop.** Manipulation events and large-residual triggers are clear. The periodic safety-net rate is an open knob.
+3. ~~**Triggering frequency for the outer loop.**~~ **IMPLEMENTED:**
+   `TriggerConfig` exposes the knobs — `on_grasp`, `on_release`,
+   `on_new_object`, `residual_threshold` (default 0.10 m), and
+   `periodic_every_n_frames` (default 90, ~3 s @ 30 Hz).
 
-4. **Scene graph relation factor parameterization.** Each relation type (containment, support, contact) needs a specific residual function. The exact form needs to be designed per relation type, balancing tightness against tolerance for shape uncertainty.
+4. ~~**Scene graph relation factor parameterization.**~~ **IMPLEMENTED:** see
+   `pose_update/factor_graph.py::relation_residual` for the residual
+   functions for `"in"`, `"on"`, and `"contact"` relations. Online relation
+   detection is in `pose_update/relation_orchestrator.py` (REST and LLM
+   backends, throttled via `relation_utils.should_recompute_relations`).
 
-5. **Recovery from EKF / pose graph divergence.** If the two tiers disagree significantly (the pose graph corrects the EKF by a large margin), this signals something is wrong. Should this trigger anything beyond absorbing the new state?
+5. **Recovery from EKF / pose graph divergence.** Still open. The pose-graph
+   posteriors are absorbed unconditionally; there is no automated detector
+   for "the two tiers disagree significantly" and no recovery path beyond
+   accepting the optimizer's output.

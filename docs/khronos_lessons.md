@@ -19,6 +19,16 @@ Khronos (Schmid et al., RSS 2024, Outstanding Systems Paper) solves a harder pro
 
 This is almost free to implement — we already have the fast path (the main loop in `data_demo.py`). The slow path is the factor graph from Improvement 2. We just need to not call it every frame, only on trigger events. Estimated change: ~10 lines (add trigger conditions around the `optimize_frame()` call).
 
+> **Status (2026-04-30):** Implemented inside the orchestrator, not in
+> `data_demo.py`. Trigger conditions live in `TriggerConfig`
+> (`pose_update/orchestrator.py:119`) and are evaluated each call to
+> `TwoTierOrchestrator.step()`. Defaults: grasp / release / new-object
+> events + 0.10 m residual threshold + 90-frame periodic safety net
+> (~3 s @ 30 Hz). The slow tier is `PoseGraphOptimizer` from
+> `pose_update/factor_graph.py`. The legacy `data_demo.py` /
+> `realtime_app.py` paths still run the old per-frame `refine_camera_pose`
+> and have not migrated to the orchestrator.
+
 ---
 
 ## 2. Fragment-as-Hypothesis
@@ -43,6 +53,20 @@ class ObjectHypothesis:
 New detections create or extend hypotheses. A hypothesis is promoted to a committed `SceneObject` only when `confidence > threshold` (e.g., seen in >3 frames with mean score >0.3). This prevents the current problem of noisy single-frame detections creating phantom objects that then pollute the scene graph and factor graph.
 
 **Estimated change:** ~60 lines — a new `ObjectHypothesisManager` class that sits between detection and `associate_by_id()`. The existing `associate_by_id()` receives only promoted hypotheses.
+
+> **Status (2026-04-30):** Implemented as Bernoulli existence probability r
+> (paper §5–§8) inside `pose_update/orchestrator.py` plus
+> `pose_update/birth_gating.py`. There is no standalone
+> `hypothesis_manager.py`; instead each track carries `r ∈ [0,1]` and is
+> "tentative" while `r < BernoulliConfig.r_conf` (default 0.5). Promotion
+> happens when r crosses `r_conf`; pruning happens at `r < r_min`
+> (default 1e-3). Birth gating uses confirmation count `birth_confirm_k=3`,
+> score floor `birth_score_min=0.20`, ICP fitness floor
+> `birth_fitness_min=0.5`, RMSE ceiling `birth_rmse_max=0.02 m`,
+> rolling-window TTL `birth_pending_ttl_frames=30`, image-edge margin
+> `birth_border_margin_px=2`, and a same-label proximity gate
+> `birth_min_dist_m=0.05 m`. Tentative tracks are exposed via
+> `TwoTierOrchestrator.tentative_objects`.
 
 ---
 
@@ -89,6 +113,19 @@ This is ~20 lines and gives us three distinct outcomes instead of one boolean. I
 - `absent` → the object moved; inflate covariance dramatically or mark for re-detection
 - `not_in_view` → keep prior (absence of evidence)
 
+> **Status (2026-04-30):** Implemented as
+> `pose_update/visibility.py::visibility_p_v` — a depth-image z-buffer test
+> that returns a continuous `p_v ∈ [0,1]` per oid, not the four-string
+> `present/occluded/absent/not_in_view` originally proposed. Semantics:
+> `p_v = 0` means fully out-of-FOV or fully occluded; `p_v = 1` means fully
+> visible (no evidence of occlusion); intermediate values reflect the
+> fraction of in-frustum object samples that pass the depth test. Used by
+> the Bernoulli predict step (paper eq:pv) when
+> `BernoulliConfig.enable_visibility=True` (default). The continuous
+> probability composes naturally with Bernoulli's existence-probability
+> update; the four-state machine collapsed into a single weight on the
+> miss-frame likelihood.
+
 ---
 
 ## 4. What NOT to Borrow
@@ -103,14 +140,12 @@ This is ~20 lines and gives us three distinct outcomes instead of one boolean. I
 
 ---
 
-## Summary: Minimal Changes to Borrow
+## Summary: Status of the Three Borrowings
 
-| Idea | Lines to add | Where | Impact |
-|------|-------------|-------|--------|
-| Two-speed trigger | ~10 | `data_demo.py` | Factor graph runs only when needed, not every frame |
-| Hypothesis layer | ~60 | New `hypothesis_manager.py` | Prevents phantom objects from noisy single-frame detections |
-| Visibility check | ~20 | `pose_update/visibility.py` | Distinguishes "gone" from "can't see" after release |
-
-Total: ~90 lines. No new dependencies. All three are independent and can be added incrementally.
+| Idea | Implemented in | Notes |
+|------|----------------|-------|
+| Two-speed trigger | `pose_update/orchestrator.py::TriggerConfig` (consumed by `TwoTierOrchestrator.step()`) | Event triggers + 0.10 m residual + 90-frame periodic safety net. Legacy `data_demo.py`/`realtime_app.py` paths have not migrated to the orchestrator. |
+| Hypothesis layer | Bernoulli existence probability `r` (`pose_update/orchestrator.py`) + `pose_update/birth_gating.py` | No standalone `hypothesis_manager.py`. Tentative tracks: `r < BernoulliConfig.r_conf=0.5`. Birth gates: `birth_confirm_k`, `birth_score_min`, `birth_fitness_min`, `birth_rmse_max`, `birth_pending_ttl_frames`, `birth_min_dist_m`. |
+| Visibility check | `pose_update/visibility.py::visibility_p_v` | Continuous `p_v ∈ [0,1]` per oid via depth-image z-buffer ray-tracing, not the four-string return originally proposed. |
 
 The biggest lesson from Khronos is not any single technique — it's the **factorization discipline**: decompose the problem by timescale, make each process only solve what's appropriate to its frequency, and defer hard decisions (fragment association, change detection) to slower processes that have more information. Our Improvement 1 (EKF) handles the fast timescale, and Improvement 2 (factor graph) handles the slow one. The three additions above fill the gaps between them.

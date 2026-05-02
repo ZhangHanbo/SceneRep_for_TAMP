@@ -127,11 +127,13 @@ on it.
 
 \textbf{Static tracks} (the default, \code{predict\_static} with
 \code{skip\_oids=held\_oids}): mean $\mu\!\leftarrow\!u_k\mu$,
-$P\!\leftarrow\!\Phi(\Ad{u_k}P\Ad{u_k}^{\!\top}+Q)$, then per-axis
-floor (\code{cfg.P\_min\_diag}, defaults $5\,\text{mm}/0.05\,\text{rad}$).
-The floor is not cosmetic: without it, $P$ shrinks below per-frame
-perception jitter after $N\!\gg\!1$ updates and the $\chi^2_3$ gate
-spuriously rejects 2--3\,cm same-object drift.
+$P\!\leftarrow\!\Phi(\Ad{u_k}P\Ad{u_k}^{\!\top}+Q)$. \code{cfg.P\_min\_diag}
+optionally floors $P$'s diagonal per-axis (default \code{None}; set to
+$\sim 5\,\text{mm}/0.05\,\text{rad}$ to prevent the chi$^2_3$ gate from
+spuriously rejecting 2--3\,cm same-object drift after $N\!\gg\!1$
+updates have shrunk $P$ below per-frame perception jitter).
+\code{cfg.P\_max} is also \code{None} by default — saturation $\Phi$
+becomes the identity unless a cap is configured.
 
 \textbf{Held tracks} (separate branch, \code{rigid\_attachment\_predict}):
 $\mu\!\leftarrow\!\Delta T_{bg}\mu$ with $\Delta T_{bg}=T_{bg,k}T_{bg,k-1}^{-1}$,
@@ -192,17 +194,44 @@ A naive 6-DOF $R_{icp}=\operatorname{diag}(R_t,\tau I)$ would couple
 $\tau$ into translation via $[t_{bc}]_{\!\times}$ and collapse $d^2_t\to 0$.
 
 \textbf{Cost} (in $\chi^2$ units, \code{cost\_d2\_mode='sum'}):
-\begin{equation}
+\begin{equation}\label{eq:cost}
    C_{il} = (d^2_{il,t}+0.1\,d^2_{il,r})
       \;-\;\alpha\,\ind[\tau_l\!=\!\tau^{(i)},\tau^{(i)}\!\ge\!0]
       \;+\;\beta\,\ind[\hat\ell_l\!\notin\!\mathcal H^{(i)}]
       \;+\;\gamma\,\max(0,1-\hat s_l)
 \end{equation}
-with $\alpha\!=\!4.4$ (SAM2-id continuity), $\beta\!=\!6.0$ (label-flicker
-soft penalty, $<G_{\text{out},t}$ so geometry can override label),
-$\gamma\!=\!2.0$ (low-score mild penalty). Outer gate
-$d^2_{il,t}\le 21.108$ (\code{gate\_mode='trans'}); cells failing it get
-the sentinel \code{\_INFEASIBLE}=$10^{12}$.
+with $\alpha\!=\!4.4$ (SAM2-id continuity, fixed). $\beta$ and $\gamma$
+are \code{BernoulliConfig} knobs (\emph{defaults} 0.0 — soft path
+disabled): \code{hungarian\_label\_penalty} and
+\code{hungarian\_score\_weight}. \code{tests/visualize\_ekf\_tracking.py}
+overrides them to $\beta\!=\!6.0$ (label-flicker soft penalty,
+$<G_{\text{out},t}$ so geometry can override label) and $\gamma\!=\!2.0$
+(low-score mild penalty). Soft mode requires
+\code{enforce\_label\_match=False}; the default
+\code{enforce\_label\_match=True} forces label-mismatch cells to
+\code{\_INFEASIBLE}=$10^{12}$ regardless of $\beta$.
+
+\textbf{Two outer gates} (in addition to the soft cost):
+\begin{enumerate}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Probabilistic chi$^2$: $d^2_{il,t}\le G_{\text{out},t}=21.108$
+   ($\chi^2_3$ at $99.97\%$, \code{gate\_mode='trans'}).
+\item Hard Euclidean residual cap: $\|\nu_{3D}\|_2 \le $
+   \code{cfg.max\_residual\_m}=$0.30$\,m. Independent of the chi$^2$
+   gate. Catches the inflated-covariance pathology where, after a long
+   miss run with $\sigma_t\!\approx\!0.4$\,m, an $0.86$\,m residual
+   gives $d^2_t\!\approx\!17 < 21.108$ and the chi$^2$ gate becomes
+   meaningless. Set to \code{None} to disable.
+\end{enumerate}
+Cells failing either gate get the sentinel \code{\_INFEASIBLE}.
+
+\textbf{Label-purity gate} (soft mode only). The membership test
+$\hat\ell_l\!\notin\!\mathcal H^{(i)}$ uses
+\code{\_label\_in\_history\_meaningful(t\_history, d\_label, min\_obs=5,
+min\_share=0.05)} from \code{pose\_update/association.py}: a label
+counts as ``in the history'' only if it has $\ge 5$ observations
+\emph{and} $\ge 5\%$ share of the total. This rejects stale
+trace-amount labels (e.g.\ 3 obs against 53\,990) that would otherwise
+bypass the $\beta$ penalty.
 
 Solver: \code{scipy.optimize.linear\_sum\_assignment} on the
 rectangular cost matrix; assignments at \code{\_INFEASIBLE} are
@@ -210,10 +239,10 @@ post-filtered out (Hungarian on a fully-infeasible row will still emit
 some column). Result: \code{match\{oid: det\_idx\}}.
 
 \textbf{Recovering the paper baseline}: \code{enforce\_label\_match=True},
-$\beta=\gamma=0$, \code{gate\_mode='full'}, \code{cost\_d2\_mode='full'}.
-\textbf{Oracle mode}: \code{association\_mode="oracle"} bypasses the
-cost matrix and matches by upstream \code{det["id"]}; used by the
-degeneracy test.
+$\beta=\gamma=0$ (the default), \code{gate\_mode='full'},
+\code{cost\_d2\_mode='full'}. \textbf{Oracle mode}:
+\code{association\_mode="oracle"} bypasses the cost matrix and matches
+by upstream \code{det["id"]}; used by the degeneracy test.
 
 \subsection{Step 3b. Per-match fine ICP}\label{sec:icp-fine}
 
@@ -291,8 +320,12 @@ leaking it on rejection; subsequent frames then ran refine-ICP against
 that stale cloud and silently dropped real birth candidates (manifested
 as the apple-in-tray + tray failing to ever birth).
 
-Birth covariance: $P_{\text{new}}=\operatorname{diag}((5\,\text{cm})^2,(0.05\,\text{rad})^2)$
-(default; \code{init\_cov\_from\_R=True} uses the ICP $\hat R$ instead).
+Birth covariance: by default ($\code{init\_cov\_from\_R}=\code{True}$,
+the \code{BernoulliConfig} default) $P_{\text{new}}=\hat R^{co}$ — the
+ICP-derived measurement covariance from the on-admission
+\code{PoseEstimator.estimate} call. Setting
+$\code{init\_cov\_from\_R}=\code{False}$ falls back to the fixed
+$\operatorname{diag}((5\,\text{cm})^2,(0.05\,\text{rad})^2)$.
 
 \subsection{Step 8. Prune + self-merge}
 
@@ -342,7 +375,13 @@ $w\!=\!\text{l\_gripper\_finger\_joint}+\text{r\_gripper\_finger\_joint}$ (from
       w_k < 0.025\,\text{m}, & \text{previously open}.
    \end{cases}
 \end{equation*}
-Phase transitions: $\{\text{open}\!\to\!\text{closed}\}=$\,\emph{grasping},
+\textbf{Project assumption.} The gripper begins fully open; ANY closing
+of the fingers registers as a grasp action. The FSM additionally fires
+whenever $w_k$ drops more than \code{close\_delta\_m}=$0.005$\,m below
+the rolling open baseline, regardless of the absolute thresholds — a
+hard-coded $0.025$\,m boundary would miss objects that the gripper
+clamps onto without fully closing. Phase transitions:
+$\{\text{open}\!\to\!\text{closed}\}=$\,\emph{grasping},
 $\{\text{closed}\!\to\!\text{closed}\}=$\,\emph{holding},
 $\{\text{closed}\!\to\!\text{open}\}=$\,\emph{releasing},
 otherwise \emph{idle}.
@@ -388,9 +427,10 @@ Step & Equation / role & Code pointer \\\hline
 1    & $Q$ schedule & \code{ekf\_se3.process\_noise\_for\_phase} \\
 1    & $r_{k|k-1}=p_s r$ (\code{B-eq:bern\_pred\_r}) & \code{bernoulli.r\_predict} \\
 2    & cleaned mask + centroid & \code{icp\_pose.\{\_clean\_mask,centroid\_cam\_from\_mask\}} \\
-3    & cost + Hungarian (\code{B-eq:cost,B-eq:hung}) & \code{association.hungarian\_associate} \\
+3    & cost + Hungarian (\code{B-eq:cost\_sam2}, \code{B-eq:hung}) & \code{association.hungarian\_associate} \\
+3    & label-purity gate & \code{association.\_label\_in\_history\_meaningful} \\
 3b   & per-match ICP & \code{PoseEstimator.estimate} (refine branch) \\
-4    & $p_v$ (\code{B-eq:pv,B-eq:rho}) & \code{visibility.visibility\_p\_v} \\
+4    & $p_v$ (\code{B-eq:pv}) & \code{visibility.visibility\_p\_v} \\
 5    & innovation, IEKF update, Joseph, Huber & \code{GaussianState.update\_observation}, \code{ekf\_se3.huber\_weight} \\
 5    & $r$ (\code{B-eq:r\_assoc}) & \code{bernoulli.r\_assoc\_update\_loglik} \\
 6    & $r$ (\code{B-eq:r\_miss}) & \code{bernoulli.r\_miss\_update} \\
@@ -432,6 +472,34 @@ held & phase + held oid inference & \code{\_GripperStateInferrer} \\
    with a tracker-side admission policy. The Bernoulli existence
    $r$ semantics are unchanged; only the gating before $r_{\text{new}}$
    is computed differs.
+\item \emph{Hard Euclidean residual cap}
+   (\code{BernoulliConfig.max\_residual\_m}=$0.30$\,m, \S\ref{sec:assoc}):
+   on top of the chi$^2$ gate, an absolute Euclidean residual cap on
+   $\|\nu_{3D}\|_2$ rejects matches that pass the probabilistic gate
+   only because the prior covariance has inflated. Independent of any
+   $\beta/\gamma$ soft-mode setting.
+\item \emph{Soft label-purity gate}
+   (\code{\_label\_in\_history\_meaningful}, \S\ref{sec:assoc}): when
+   \code{enforce\_label\_match=False}, the soft $\beta$-penalty is
+   bypassed only for labels with $\ge 5$ observations \emph{and}
+   $\ge 5\%$ share of the track's history — pure dict membership
+   would be triggered by 3 stale obs against tens of thousands of
+   correct ones, defeating the soft penalty.
+\item \emph{Gravity-aware predict at release} (\S\ref{B-sec:gravity}):
+   the orchestrator detects the FSM exiting
+   $\{\text{holding},\text{releasing}\}$ and replaces the just-released
+   oid's $(T_{wo},\,P_{wo})$ with the post-fall prediction from
+   \code{pose\_update/gravity\_predict.py}. Voxel observability
+   (\code{pose\_update/voxel\_observability.py}) supplies the supporting
+   surface; \code{pose\_update/object\_dynamics.py} resolves
+   per-label dynamics ($e$, $\mu$, shape, $r_{\text{obj}}$). The
+   pre-2026 release-time Q was a generic ``essentially unknown''
+   inflate that left the EKF mean at the gripper height, so the next
+   re-observation had to apply a 30\,cm correction in one step. With
+   the gravity hook the mean lands at the predicted resting-pose,
+   inflated only by the parametric $(\sigma_{xy},\,\sigma_z,\,\sigma_{\text{yaw}})$.
+   Gated by \code{BernoulliConfig.gravity\_predict} and
+   \code{TwoTierOrchestrator.voxel\_obs} (None disables the hook).
 \end{enumerate}
 
 \end{document}

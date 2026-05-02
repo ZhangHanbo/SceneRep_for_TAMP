@@ -28,7 +28,7 @@ python rosbag2dataset/rosbag2dataset_5hz.py [dataname.bag]
 
 3. Run OWL-ViT object scoring & SAM segmentation
 ```bash
-python rosbag2dataset/owl/owl_object_score.py [dataname]
+python rosbag2dataset/owl/owl_object_scores.py [dataname]
 python rosbag2dataset/sam/sam.py [dataname]
 ```
 
@@ -52,3 +52,12 @@ python det_server.py
 ```bash
 python realtime_app.py
 ```
+
+## Further Reading
+
+- `docs/DISCUSSION.md` — architectural rationale (two-tier hierarchy, base-frame fusion, composed observation noise).
+- `docs/PLAN.md` — implementation roadmap with current status mapping each task to its source file.
+- `docs/improvements.md` — original EKF + factor-graph design notes.
+- `docs/khronos_lessons.md` — design patterns borrowed from Khronos.
+- `docs/survey_and_analysis.md` — comparative survey vs TSDF++/MidFusion/ConceptGraphs/etc.
+- `det_pipeline/README_detect_objects.md` — `detect_objects_on_image()` API reference.

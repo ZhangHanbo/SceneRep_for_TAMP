@@ -750,6 +750,28 @@ class RBPFState:
             any_merged = True
         return any_merged
 
+    def overwrite_object_pose(self, oid: int,
+                              T_wo: np.ndarray,
+                              P_wo: np.ndarray) -> bool:
+        """Force every particle's `(mu, cov)` for `oid` to `(T_wo, P_wo)`.
+
+        Used by the gravity-aware predict at release to install a
+        post-fall world-frame pose into the filter; per-particle
+        collapsed view will then yield exactly `(T_wo, P_wo)`. Returns
+        True iff at least one particle carried the oid.
+        """
+        T_wo = np.asarray(T_wo, dtype=np.float64)
+        P_wo = np.asarray(P_wo, dtype=np.float64)
+        if T_wo.shape != (4, 4) or P_wo.shape != (6, 6):
+            raise ValueError("T_wo must be (4, 4) and P_wo (6, 6)")
+        any_set = False
+        for p in self.particles:
+            if oid in p.objects:
+                p.objects[oid].mu = T_wo.copy()
+                p.objects[oid].cov = P_wo.copy()
+                any_set = True
+        return any_set
+
     # --------------------------------------------------------------- #
     #  Collapsing to single-Gaussian summaries (for legacy consumers)
     # --------------------------------------------------------------- #

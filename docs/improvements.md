@@ -1,5 +1,29 @@
 # Minimal-Effort Improvements for Tight Coupling
 
+> **Implementation Status (2026-04-30):** Both improvements are implemented;
+> the actual code is broader than the snippets below.
+>
+> * Improvement 1 (per-object EKF on SE(3)) → `pose_update/ekf_se3.py`
+>   plus the `pose_cov` / `label_belief` / `pose_uncertain` fields on
+>   `scene/scene_object.py`. Public functions: `se3_exp`, `se3_log`,
+>   `se3_adjoint`, `ekf_predict`, `ekf_update`, `ekf_update_base_frame`,
+>   `compose_observation_noise`, `pose_entropy`, `pose_is_uncertain`,
+>   `process_noise_for_phase`, `update_label_belief`, `huber_weight`,
+>   `saturate_covariance`.
+> * Improvement 2 (joint factor graph) →
+>   `pose_update/factor_graph.py::PoseGraphOptimizer` (class API — the
+>   `optimize_frame()` function in the snippets below was never built).
+>   Wired in via `pose_update/orchestrator.py:39, 624` and
+>   `pose_update/orchestrator_gaussian.py`. **Not yet wired into
+>   `data_demo.py:530` / `realtime_app.py:745`** — those still call the
+>   legacy `pose_update/camera_pose_refiner.py::refine_camera_pose`.
+>   That migration is tracked separately.
+>
+> The original proposal is preserved below as design rationale. Concrete
+> claims (line numbers, function signatures, "add 2 lines at line 89")
+> reflect the *plan*, not current code; consult the source for the
+> canonical API.
+
 Two improvements, designed to work with the existing codebase with minimal changes.
 
 ---
@@ -29,6 +53,15 @@ A critical design constraint that shapes both improvements:
 ---
 
 ## Improvement 1: Probabilistic Pose and Label Tracking
+
+> **Implemented (2026-04-30).** See `pose_update/ekf_se3.py` and
+> `scene/scene_object.py`. The EKF API is broader than the snippet below;
+> notably it includes per-phase process noise (`process_noise_for_phase`),
+> base-frame fusion (`ekf_update_base_frame`, originally Task 3 in PLAN.md),
+> covariance saturation (`saturate_covariance`), Huber inner-gate weighting
+> (`huber_weight`), and a Beta-Bernoulli label-belief helper
+> (`update_label_belief`). Phase tracking is owned by
+> `pose_update/gripper_state.py`'s FSM.
 
 ### Problem
 
@@ -257,6 +290,20 @@ Total: **~100 new lines**, **~5 lines modified**.
 ---
 
 ## Improvement 2: Factor Graph for Joint Camera-Object Optimization
+
+> **Implemented (2026-04-30).** See `pose_update/factor_graph.py`. The
+> shipping API is `class PoseGraphOptimizer` (not `optimize_frame()`), with
+> dataclasses `Observation`, `RelationEdge`, `OptimizationResult` and a
+> stand-alone `relation_residual()` for "in"/"on"/"contact" relations.
+> Adaptive Barron robust kernels live in `pose_update/adaptive_kernel.py`
+> and are wrapped around graph factors. The optimizer is consumed by the
+> orchestrator slow tier (`pose_update/orchestrator.py`,
+> `orchestrator_gaussian.py`), gated by `TriggerConfig` (grasp/release/
+> new-object events + 0.10 m residual + 90-frame periodic safety net).
+>
+> **Migration gap:** `data_demo.py:530` and `realtime_app.py:745` still call
+> `refine_camera_pose` — those call sites have not migrated to the
+> orchestrator. Tracked separately.
 
 ### Problem
 

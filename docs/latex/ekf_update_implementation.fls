@@ -2,7 +2,7 @@ PWD /Volumes/External/Workspace/nus_deliver/SceneRep_for_TAMP/docs/latex
 INPUT /usr/local/texlive/2026/texmf.cnf
 INPUT /usr/local/texlive/2026/texmf-dist/web2c/texmf.cnf
 INPUT /usr/local/texlive/2026/texmf-var/web2c/pdftex/pdflatex.fmt
-INPUT /Volumes/External/Workspace/nus_deliver/SceneRep_for_TAMP/docs/latex/ekf_update_implementation.tex
+INPUT ekf_update_implementation.tex
 OUTPUT ekf_update_implementation.log
 INPUT /usr/local/texlive/2026/texmf-dist/tex/latex/base/article.cls
 INPUT /usr/local/texlive/2026/texmf-dist/tex/latex/base/article.cls

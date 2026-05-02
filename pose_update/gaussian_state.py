@@ -266,7 +266,8 @@ class GaussianState:
 
     def predict_static(self, Q_fn: Callable[[int], np.ndarray],
                         P_max: Optional[np.ndarray] = None,
-                        skip_oids: Optional[set] = None) -> None:
+                        skip_oids: Optional[set] = None,
+                        unobserved_oids: Optional[set] = None) -> None:
         """Propagate base-frame belief under BASE motion (world-static
         object). Derivation: a world-static object satisfies
             T_wb(t) · T_bo(t) = T_wb(t-1) · T_bo(t-1)         (T_wo const)
@@ -278,8 +279,20 @@ class GaussianState:
         changes, and produce metre-scale drift on a real trajectory --
         bernoulli_ekf.tex §5).
 
-        Thin wrapper around
-        `object_belief.predict_ad_conjugate(μ, Σ, u_k, Q, P_max, floor)`.
+        Two regimes per oid (keyframe-mechanism, plan §C.1):
+
+        * `oid in unobserved_oids` -- no observation last frame. The
+          stored cov_bo IS the implicit keyframe value (the post-update
+          cov from the last observation). Apply ONLY the deterministic
+          mean update `mu_bo = u_k @ mu_bo`. Skip the Ad-conjugate cov
+          transport and skip Q. This is required to satisfy the
+          intent that an unobserved static object's world uncertainty
+          grows only via the current Σ_wb-lever in
+          `collapsed_object_world`, NOT via per-frame predict drift.
+
+        * Otherwise -- track was observed at frame k-1 (or just born).
+          Run the full predict (Ad-conjugate + Q) so the upcoming
+          joseph update has a properly inflated prior.
 
         `skip_oids`: tracks whose predict should be owned by a
         different motion model this frame (e.g. held objects whose
@@ -294,12 +307,16 @@ class GaussianState:
         if not self.objects:
             return
         skip = skip_oids if skip_oids is not None else set()
+        unobs = unobserved_oids if unobserved_oids is not None else set()
 
         if self.prev_T_wb is None:
-            # No base-motion baseline yet. delta = I -> μ unchanged, cov += Q.
+            # No base-motion baseline yet. delta = I -> μ unchanged.
             I4 = np.eye(4, dtype=np.float64)
             for oid, b in self.objects.items():
                 if oid in skip:
+                    continue
+                if oid in unobs:
+                    # Mean is unchanged (delta = I). cov_bo frozen.
                     continue
                 b.mu_bo, b.cov_bo = predict_ad_conjugate(
                     b.mu_bo, b.cov_bo, I4, Q_fn(oid),
@@ -310,6 +327,12 @@ class GaussianState:
         u_k = np.linalg.inv(self.T_wb) @ self.prev_T_wb
         for oid, b in self.objects.items():
             if oid in skip:
+                continue
+            if oid in unobs:
+                # Deterministic mean update only -- keep mu_bo
+                # consistent with the new T_wb. cov_bo is FROZEN at
+                # the keyframe value (no Ad transport, no Q).
+                b.mu_bo = u_k @ b.mu_bo
                 continue
             b.mu_bo, b.cov_bo = predict_ad_conjugate(
                 b.mu_bo, b.cov_bo, u_k, Q_fn(oid),
@@ -680,20 +703,54 @@ class GaussianState:
     def predict_static_all(self,
                             Q_fn: Callable[[int], np.ndarray],
                             skip_oids: Optional[set] = None,
-                            P_max: Optional[np.ndarray] = None) -> None:
+                            P_max: Optional[np.ndarray] = None,
+                            unobserved_oids: Optional[set] = None) -> None:
         """Static-object predict for every oid not in `skip_oids`.
 
         `skip_oids` is FULLY skipped (no u_k propagation, no Q) -- the
         caller is expected to apply a different motion model (e.g.
         `rigid_attachment_predict`) for those oids. See the
         `predict_static` docstring for why zeroing Q wasn't sufficient.
+
+        `unobserved_oids` are tracks not observed last frame; they get
+        only the deterministic mean update (cov_bo frozen, no Q) per
+        the keyframe mechanism (plan §C.1).
         """
-        self.predict_static(Q_fn, P_max=P_max, skip_oids=skip_oids)
+        self.predict_static(Q_fn, P_max=P_max, skip_oids=skip_oids,
+                             unobserved_oids=unobserved_oids)
 
     def collapsed_base(self) -> PoseEstimate:
         """The current SLAM posterior, echoed for API symmetry with RBPF."""
         assert self.T_wb is not None, "ingest_slam has not been called yet"
         return PoseEstimate(T=self.T_wb.copy(), cov=self.Sigma_wb.copy())
+
+    def overwrite_object_pose(self, oid: int,
+                               T_wo: np.ndarray,
+                               P_wo: np.ndarray) -> bool:
+        """Force the EKF state for `oid` to a world-frame `(T_wo, P_wo)`.
+
+        Used by the gravity-aware predict at release: the input is a
+        world-frame mean+cov from `gravity_predict.predict_landing_pose`,
+        and we install it into the body-frame storage so subsequent
+        per-frame predict / collapsed_object_world calls reflect the
+        post-fall belief. Returns True iff `oid` is currently tracked.
+
+        The body-frame transport: under right-trivialisation, the
+        right-tangent at the new `mu_bo = T_wb⁻¹ · T_wo` equals the
+        right-tangent at `T_wo` numerically, so the cov transport is
+        the identity. (Plan §C.2.)
+        """
+        T_wo = np.asarray(T_wo, dtype=np.float64)
+        P_wo = np.asarray(P_wo, dtype=np.float64)
+        if T_wo.shape != (4, 4) or P_wo.shape != (6, 6):
+            raise ValueError("T_wo must be (4, 4) and P_wo (6, 6)")
+        b = self.objects.get(oid)
+        if b is None:
+            return False
+        assert self.T_wb is not None, "ingest_slam has not been called yet"
+        b.mu_bo = np.linalg.inv(self.T_wb) @ T_wo
+        b.cov_bo = 0.5 * (P_wo + P_wo.T)
+        return True
 
     def collapsed_object_base(self, oid: int) -> Optional[PoseEstimate]:
         b = self.objects.get(oid)

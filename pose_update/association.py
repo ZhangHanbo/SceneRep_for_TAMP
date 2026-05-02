@@ -32,6 +32,48 @@ from scipy.optimize import linear_sum_assignment
 _INFEASIBLE: float = 1e12
 
 
+def _label_in_history_meaningful(
+    t_history: Any,
+    d_label: Optional[str],
+    min_obs: int = 5,
+    min_share: float = 0.05,
+) -> bool:
+    """Whether `d_label` is a *meaningful* member of a track's label
+    history.
+
+    A label "is in history" only if it has BOTH (a) ≥ ``min_obs``
+    observations AND (b) ≥ ``min_share`` of the track's total
+    observations. This guards the soft-label-penalty bypass against
+    polluted histories — e.g., a track with 53,990 "apple" obs and 3
+    stray "bowl" obs (purity 0.006%) should NOT be considered
+    permissive of a bowl detection.
+
+    Accepts the same shapes as the legacy membership check:
+      * Mapping[label, {n_obs, ...}] — uses `n_obs` for purity.
+      * Set / List / Mapping without n_obs — falls back to pure
+        membership (legacy behaviour preserved).
+      * None — always False.
+    """
+    if not t_history or d_label is None:
+        return False
+    if isinstance(t_history, Mapping):
+        rec = t_history.get(d_label)
+        if rec is None:
+            return False
+        if isinstance(rec, Mapping) and "n_obs" in rec:
+            def _n(r: Any) -> int:
+                return (int(r.get("n_obs", 0))
+                        if isinstance(r, Mapping) else 1)
+            n_d = _n(rec)
+            if n_d < min_obs:
+                return False
+            total = sum(_n(r) for r in t_history.values()) or 1
+            return (n_d / total) >= min_share
+        # Mapping without n_obs payload — pure membership.
+        return True
+    return d_label in t_history
+
+
 @dataclass
 class AssociationResult:
     """Output of a single association pass.
@@ -80,6 +122,7 @@ def hungarian_associate(
     G_out_trans: float = 21.108,
     G_out_rot: float = 21.108,
     cost_d2_mode: str = "full",
+    max_residual_m: Optional[float] = None,
 ) -> AssociationResult:
     """Solve the Hungarian assignment of tracks to detections.
 
@@ -161,6 +204,12 @@ def hungarian_associate(
                        the cost; rotation only gates / not gates).
             'sum'   -> cost = d^2_trans + 0.1*d^2_rot - alpha*..
                        (heavy translation, light rotation tie-break).
+        max_residual_m: optional hard cap on the world-frame
+            translation residual ‖ν[:3]‖ (metres). Catches the
+            inflated-covariance pathology: under long miss runs the
+            chi² gate becomes meaningless because σ_trans grows
+            without bound, and any "nearby-ish" detection passes.
+            Default None disables the absolute gate.
 
     Returns:
         AssociationResult.
@@ -255,6 +304,16 @@ def hungarian_associate(
                 if not math.isfinite(d2) or d2 > G_out:
                     continue
 
+            # (b') Hard absolute-distance gate. The chi² gate above
+            # is *probabilistic*: it goes lax when the track's σ has
+            # ballooned during long miss runs. A 0.86 m residual
+            # against σ ≈ 0.37 m gives d² ≈ 17 — under any chi² gate.
+            # `max_residual_m` puts a sanity cap on the world-frame
+            # translation residual itself.
+            if max_residual_m is not None:
+                if float(np.linalg.norm(nu[:3])) > max_residual_m:
+                    continue
+
             # Pick which d^2 enters the cost.
             if cost_d2_mode == "trans":
                 d2_for_cost = d2_trans
@@ -279,12 +338,16 @@ def hungarian_associate(
             if (not enforce_label_match
                     and label_penalty > 0.0
                     and d_label is not None):
-                # Membership test handles Set / Mapping / List / None.
-                in_history = (
-                    (t_history is not None and d_label in t_history)
-                    or (t_history is None and t_label is not None
-                        and d_label == t_label)
-                )
+                # Purity-aware membership: a stale trace label (3 vs
+                # 53,990) must NOT bypass the penalty. `t_history`
+                # without n_obs payload still resolves to legacy
+                # membership semantics for back-compat.
+                if t_history is not None:
+                    in_history = _label_in_history_meaningful(
+                        t_history, d_label)
+                else:
+                    in_history = (t_label is not None
+                                   and d_label == t_label)
                 if not in_history:
                     label_pen = float(label_penalty)
 
