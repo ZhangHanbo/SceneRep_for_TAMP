@@ -70,7 +70,15 @@ bernoulli:
   G_out_rot:   21.108
   gate_mode:    trans
   cost_d2_mode: sum
-  max_residual_m: 0.30
+  # max_residual_m: hard cap on the world-frame translation residual,
+  # in addition to the probabilistic chi² gate. Was 0.30 m — too tight
+  # when a track's σ has ballooned (e.g. after gravity_predict at
+  # release: apple_drop oid 6 had σ_xy ≈ 0.145 m, so a 0.37 m residual
+  # at fr 396 was only ~2.5σ but failed the absolute cap, and the
+  # re-detected apple was forced to be born as a new track. 0.50 m
+  # keeps the cap bounded (still rejects > 0.5 m world residuals) but
+  # accommodates plausible post-release association windows.
+  max_residual_m: 0.50
 
   # P_max is a 6-vector lifted to a (6,6) np.diag.
   # Production: trans 0.25 m std, rot pi/4 rad std.

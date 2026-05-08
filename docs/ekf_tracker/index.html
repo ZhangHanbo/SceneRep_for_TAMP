@@ -112,127 +112,20 @@ for rgb, depth, T_wb, T_bg, width, joints in stream:
         print(oid, obj.label, obj.pose[:3, 3], "r =", obj.r)</code></pre>
 
 <h2>The five APIs</h2>
-
-<div class="api">
-<h3>EkfTracker(K, *, T_bc=None, ...)</h3>
-<p>Constructs a tracker. Defaults are loaded from <code>ekf_tracker/configs/default.yaml</code>; pass <code>K</code> (3×3 intrinsics) and the <code>T_bc</code> camera-from-base extrinsic if you have it.</p>
-<p class="io"><b>In:</b> camera intrinsics &amp; extrinsics. <b>Out:</b> tracker instance.</p>
-<pre><code>import numpy as np
-from ekf_tracker import EkfTracker
-
-K    = np.array([[554.38, 0, 320.5], [0, 554.38, 240.5], [0, 0, 1]])
-T_bc = np.eye(4)
-tracker = EkfTracker(K=K, T_bc=T_bc)</code></pre>
-<details><summary>All constructor keyword args</summary><div class="body">
+<p>Full reference — every method's signature, inputs/outputs, and runnable demo — lives in <a href="./api.md"><code>api.md</code></a>.</p>
+<p>At a glance:</p>
 <table>
-<thead><tr><th>kwarg</th><th>default</th><th>meaning</th></tr></thead>
+<thead><tr><th>API</th><th>purpose</th></tr></thead>
 <tbody>
-<tr><td class="f">T_bc</td><td><code>None</code></td><td>camera-from-base extrinsic; can also be passed per-frame to <code>step</code></td></tr>
-<tr><td class="f">robot_type</td><td><code>"fetch"</code></td><td>URDF lookup key; <code>"panda"</code> etc. are valid if the geometry exists</td></tr>
-<tr><td class="f">relation_backend</td><td><code>None</code></td><td>overrides the YAML's <code>relation.backend</code>: <code>"llm"</code> | <code>"rest"</code> | <code>"none"</code></td></tr>
-<tr><td class="f">relation_cache_dir</td><td><code>None</code></td><td>filesystem cache for the relation client</td></tr>
-<tr><td class="f">pose_method</td><td><code>"icp_chain"</code></td><td>fast-tier pose method</td></tr>
-<tr><td class="f">owl_server</td><td><code>None</code></td><td>OWL-ViT server URL for <code>detect()</code></td></tr>
-<tr><td class="f">sam2_server</td><td><code>None</code></td><td>SAM2 streaming server URL for <code>detect()</code></td></tr>
-<tr><td class="f">bernoulli_cfg</td><td><code>None</code></td><td>explicit <code>BernoulliConfig</code> (otherwise from YAML)</td></tr>
-<tr><td class="f">voxel_obs</td><td><code>None</code></td><td>explicit <code>VoxelObservability</code> (otherwise from YAML)</td></tr>
-<tr><td class="f">image_shape</td><td><code>(480, 640)</code></td><td><code>(H, W)</code> for the in-frame border birth gate</td></tr>
-<tr><td class="f">trigger</td><td><code>None</code></td><td>explicit <code>TriggerConfig</code> for slow-tier scheduling</td></tr>
+<tr><td class="f">EkfTracker(K, *, T_bc=None, ...)</td><td>construct a tracker; defaults from <code>default.yaml</code></td></tr>
+<tr><td class="f">tracker.detect(rgb, vocabulary, history=None)</td><td>OWL-ViT + SAM2 streaming detection</td></tr>
+<tr><td class="f">tracker.step(dets, rgb, depth, *, slam_pose, ...)</td><td>one frame: predict → update → birth/prune → <code>SceneView</code></td></tr>
+<tr><td class="f">tracker.get_scene()</td><td>read-only snapshot of current objects + relations</td></tr>
+<tr><td class="f">tracker.get_points(object_id)</td><td>world-frame point cloud for one tracked object</td></tr>
+<tr><td class="f">tracker.smooth()</td><td>slow-tier pose-graph optimization over cached priors</td></tr>
 </tbody>
 </table>
-<p class="io">Source: <code>ekf_tracker/api.py::EkfTracker.__init__</code>.</p>
-</div></details>
-</div>
-
-<div class="api">
-<h3>tracker.detect(rgb, vocabulary, history=None)</h3>
-<p>Runs the live OWL-ViT + SAM2-streaming detection pipeline. Pass <code>history=None</code> on the first call; thread the returned session handle through subsequent calls. Skip this method if you have cached detections.</p>
-<p class="io"><b>In:</b> <code>rgb</code> <code>(H,W,3) uint8</code>, <code>vocabulary: List[str]</code>, optional session handle. <b>Out:</b> <code>(detections: List[Dict], history)</code>.</p>
-<pre><code>dets, hist = tracker.detect(rgb, vocabulary=["apple", "bowl"], history=None)
-# next frame:
-dets, hist = tracker.detect(rgb_next, ["apple", "bowl"], hist)</code></pre>
-<details><summary>Detection dict format</summary><div class="body">
-<pre><code>{
-    "id":         17,                  # SAM2 tracklet id (stable across frames)
-    "object_id":  17,                  # alias of id
-    "label":      "apple",
-    "score":      0.94,                # this frame's OWL score
-    "mean_score": 0.91,                # rolling mean over n_obs frames
-    "n_obs":      12,
-    "box":        [x1, y1, x2, y2],
-    "mask":       "&lt;base64 PNG, decoded to (H,W) {0,1} uint8&gt;",
-}</code></pre>
-<p class="io">The cached files at <code>tests/visualization_pipeline/&lt;traj&gt;/perception/detection_h/*.json</code> use this format; you can feed them straight into <code>step()</code> without ever calling <code>detect()</code>.</p>
-</div></details>
-</div>
-
-<div class="api">
-<h3>tracker.step(detections, rgb, depth, *, slam_pose, T_bc=None, T_bg=None, gripper_width=None, joints=None) → SceneView</h3>
-<p>One frame of the canonical pipeline (predict → update → birth/prune). <code>slam_pose</code> is the world-from-base SLAM pose <code>T_wb</code>.</p>
-<p class="io"><b>In:</b> detections, <code>rgb</code>, <code>depth (H,W) float32 m</code>, <code>slam_pose (4,4)</code>, gripper extrinsics &amp; proprio. <b>Out:</b> <code>SceneView</code>.</p>
-<pre><code>scene = tracker.step(
-    dets, rgb, depth,
-    slam_pose=T_wb, T_bc=T_bc, T_bg=T_bg,
-    gripper_width=width, joints=joints,
-)
-print(len(scene.objects), "objects;", len(scene.relations), "edges")</code></pre>
-<details><summary>All <code>step()</code> arguments</summary><div class="body">
-<table>
-<thead><tr><th>arg</th><th>type</th><th>meaning</th></tr></thead>
-<tbody>
-<tr><td class="f">detections</td><td><code>List[Dict]</code></td><td>per-frame detections (see format above)</td></tr>
-<tr><td class="f">rgb</td><td><code>(H,W,3) uint8</code></td><td>RGB image</td></tr>
-<tr><td class="f">depth</td><td><code>(H,W) float32</code></td><td>depth in metres; 0/NaN for invalid</td></tr>
-<tr><td class="f">slam_pose</td><td><code>(4,4)</code></td><td>world-from-base SLAM pose <code>T_wb</code></td></tr>
-<tr><td class="f">T_bc</td><td><code>(4,4)</code> | <code>None</code></td><td>camera-from-base; falls back to constructor value</td></tr>
-<tr><td class="f">T_bg</td><td><code>(4,4)</code> | <code>None</code></td><td>gripper-from-base; needed for gripper FSM &amp; gravity predict</td></tr>
-<tr><td class="f">gripper_width</td><td><code>float</code> | <code>None</code></td><td>finger gap, metres</td></tr>
-<tr><td class="f">joints</td><td><code>Dict[str,float]</code> | <code>None</code></td><td>joint state for grasp-owner geometric containment</td></tr>
-</tbody>
-</table>
-<p class="io">Source: <code>ekf_tracker/api.py::EkfTracker.step</code> — mirrors <code>scripts/visualize_ekf_tracking.py:main()</code>.</p>
-</div></details>
-</div>
-
-<div class="api">
-<h3>tracker.get_scene() → SceneView</h3>
-<p>Read-only snapshot of currently tracked objects + relations, without stepping.</p>
-<p class="io"><b>In:</b> none. <b>Out:</b> <code>SceneView</code>.</p>
-<pre><code>scene = tracker.get_scene()
-for oid, obj in scene.objects.items():
-    print(oid, obj.label, obj.pose[:3, 3], "r =", obj.r)
-for edge in scene.relations:
-    print(edge["parent"], edge["type"], edge["child"], edge["score"])</code></pre>
-<details><summary>SceneView / EkfObject fields</summary><div class="body">
-<pre><code>@dataclass
-class SceneView:
-    objects:   Dict[int, EkfObject]      # oid → snapshot
-    relations: List[Dict[str, Any]]      # [{parent, child, type, score}, …]
-
-@dataclass
-class EkfObject:
-    id:    int                            # stable oid assigned at birth
-    label: str
-    pose:  np.ndarray                     # (4,4) world-frame mean T_wo
-    cov:   np.ndarray                     # (6,6) tangent covariance, [v, ω]
-    r:     float                          # Bernoulli existence ∈ [0, 1]</code></pre>
-</div></details>
-</div>
-
-<div class="api">
-<h3>tracker.get_points(object_id) → np.ndarray</h3>
-<p>Accumulated ICP reference cloud for one tracked object, transformed to world coordinates.</p>
-<p class="io"><b>In:</b> <code>object_id: int</code>. <b>Out:</b> <code>(N, 3) float32</code>; empty <code>(0, 3)</code> if the oid is unknown or has no points yet.</p>
-<pre><code>pts = tracker.get_points(0)
-print(pts.shape)                          # (N, 3)</code></pre>
-</div>
-
-<div class="api">
-<h3>tracker.smooth() → SceneView</h3>
-<p>Runs the slow-tier <code>PoseGraphOptimizer</code> over the cached priors + relation graph and returns the refreshed scene. Re-uses the SLAM pose, extrinsics, and held-state from the most recent <code>step()</code>. No-op (returns empty <code>SceneView</code>) if <code>step()</code> has not been called.</p>
-<p class="io"><b>In:</b> none. <b>Out:</b> <code>SceneView</code>.</p>
-<pre><code>scene = tracker.smooth()</code></pre>
-</div>
+<p>See <a href="./api.md"><code>api.md</code></a> for the full per-method writeup with input/output tables, SceneView/EkfObject field definitions, and copy-pasteable demos.</p>
 
 
 <h2>Reference</h2>
