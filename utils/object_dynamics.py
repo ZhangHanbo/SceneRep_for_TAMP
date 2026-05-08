@@ -58,53 +58,34 @@ class ObjectDynamicsProperty:
             raise ValueError(f"mass_kg must be positive; got {self.mass_kg}")
 
 
-# Conservative starting points sourced from:
-#   * Apple bruise-prediction literature (e ≈ 0.20–0.30 ripe).
-#   * Engineering tables for plastics, glass, wood, rubber.
-#   * Friction values for typical tabletop / floor surfaces.
-DEFAULT_DYNAMICS = ObjectDynamicsProperty(
-    label="default", e=0.40, mu=0.50, shape="irregular", radius_m=0.05,
-)
-
-LABEL_DYNAMICS_TABLE: Mapping[str, ObjectDynamicsProperty] = {
-    "apple":     ObjectDynamicsProperty("apple",     e=0.30, mu=0.55, shape="spherical",   radius_m=0.04),
-    "milkbox":   ObjectDynamicsProperty("milkbox",   e=0.40, mu=0.45, shape="box",         radius_m=0.06),
-    "cola":      ObjectDynamicsProperty("cola",      e=0.50, mu=0.40, shape="cylindrical", radius_m=0.04),
-    "cup":       ObjectDynamicsProperty("cup",       e=0.40, mu=0.50, shape="cylindrical", radius_m=0.04),
-    "pot":       ObjectDynamicsProperty("pot",       e=0.40, mu=0.50, shape="cylindrical", radius_m=0.07),
-    "flowerpot": ObjectDynamicsProperty("flowerpot", e=0.30, mu=0.55, shape="cylindrical", radius_m=0.07),
-}
-
-# Footprint factor used by gravity_predict to scale the lateral spread
-# by an object's resting orientation count. Spherical: settles in place
-# (small footprint); irregular: any contact face can be down (full
-# footprint).
-SHAPE_FOOTPRINT_FACTOR: Mapping[str, float] = {
-    "spherical":   0.25,
-    "cylindrical": 0.50,
-    "box":         0.70,
-    "irregular":   1.00,
-}
+# Module-level constants removed --- the dynamics table is now driven
+# by ``ekf_tracker/configs/default.yaml`` (section ``object_dynamics:``).
+# Build via ``ekf_tracker.configs.build_object_dynamics_table(cfg)``,
+# which returns ``(default, label_table, footprint_factor)``.
 
 
 def lookup_dynamics(
     label: Optional[str],
+    *,
+    default: ObjectDynamicsProperty,
+    table: Mapping[str, ObjectDynamicsProperty],
     override: Optional[ObjectDynamicsProperty] = None,
 ) -> ObjectDynamicsProperty:
     """Resolve the dynamics property for a label, with optional override.
 
     Resolution order:
-      1. `override` if provided (perception-side estimator hook).
-      2. `LABEL_DYNAMICS_TABLE[label]` if the label is known.
-      3. `DEFAULT_DYNAMICS`.
+      1. ``override`` if provided (perception-side estimator hook).
+      2. ``table[label]`` if the label is known.
+      3. ``default``.
     """
     if override is not None:
         return override
     if label is None:
-        return DEFAULT_DYNAMICS
-    return LABEL_DYNAMICS_TABLE.get(label, DEFAULT_DYNAMICS)
+        return default
+    return table.get(label, default)
 
 
-def shape_footprint_factor(shape: str) -> float:
-    """Return the lateral-spread shape factor (used by `gravity_predict`)."""
-    return SHAPE_FOOTPRINT_FACTOR.get(shape, SHAPE_FOOTPRINT_FACTOR["irregular"])
+def shape_footprint_factor(shape: str, *,
+                            factors: Mapping[str, float]) -> float:
+    """Return the lateral-spread shape factor."""
+    return factors.get(shape, factors["irregular"])

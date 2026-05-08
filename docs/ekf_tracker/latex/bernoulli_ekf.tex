@@ -1,10 +1,19 @@
 %-----------------------------------------------------------------------------
 %  Bernoulli-EKF Multi-Target Tracker on SE(3) — design + implementation
+%  Four-part document: (I) compact algorithmic summary, (II) detailed
+%  algorithmic exposition (no code references), (III) algorithm-to-code
+%  map (one file path per line), (IV) reviewer-style critique.
 %-----------------------------------------------------------------------------
 \documentclass[11pt]{article}
 \usepackage[margin=1in]{geometry}
 \usepackage{amsmath,amssymb,amsthm,mathtools,bm,enumitem,hyperref}
 \usepackage{algpseudocode,algorithm}
+\usepackage{xcolor}
+
+% Verdict tags used in Part V.
+\newcommand{\REDUNDANT}{\textcolor{red}{\textbf{REDUNDANT.}}}
+\newcommand{\REFERENCE}{\textbf{Reference.}}
+\newcommand{\PRINCIPLED}{\textbf{Principled.}}
 
 \DeclareMathOperator{\Tr}{tr}
 \DeclareMathOperator{\Exp}{Exp}
@@ -24,102 +33,111 @@
 \begin{document}
 \maketitle
 
-\section*{Part I — Algorithmic Overview}
-\label{sec:overview}
+%=============================================================================
+\section*{Part I --- One-page Algorithmic Summary}
+\label{sec:summary}
 
-The system tracks per-object Bernoulli-Gaussian beliefs over rigid
-body poses on $\SE$, conditioned on RGB-D detections from a moving
-camera mounted on a manipulator. Per frame $k$ it ingests the SLAM
-base-pose $T_{wb,k}$, the camera-to-base extrinsic $T_{bc,k}$, the
-gripper-to-base $T_{bg,k}$, the gripper finger width, and a list of
-SAM2 detections $\{(\mathrm{pid}_d, \mathrm{label}_d, \mathrm{mask}_d,
-\mathrm{score}_d)\}_d$ projected through depth.
+The system maintains per-object Bernoulli--Gaussian beliefs over rigid-body
+poses on $\SE$, conditioned on RGB-D detections from a moving camera mounted
+on a manipulator. Each frame $k$ ingests the SLAM base pose $T_{wb,k}$, the
+camera-to-base extrinsic $T_{bc,k}$, the gripper-to-base $T_{bg,k}$, the
+gripper finger width, and a list of detections
+$\{(\mathrm{pid}_d,\mathrm{label}_d,\mathrm{mask}_d,\mathrm{score}_d)\}_d$
+projected through depth.
 
-\paragraph{1. State.} Each track $o$ carries
-$(\mu_{bo}, \Sigma_{bo}, r_o, \ell_o, \tau_o)$:
-$\mu_{bo} \in \SE$ is the object pose in the \emph{base} frame,
-$\Sigma_{bo} \in \R^{6\times 6}$ is its covariance in the body-frame
-tangent at $\mu_{bo}$, $r_o \in [0,1]$ is the existence probability,
-$\ell_o$ a label histogram, and $\tau_o$ the SAM2 perception id.
-\emph{Base-frame storage is the canonical choice}: SLAM uncertainty
-$\Sigma_{wb}$ never enters the recursion; the world view is the
-deterministic composition $T_{wo} = T_{wb}\,\mu_{bo}$.
+\paragraph{1. State.} Track $o$ stores
+$(\mu_{bo},\,\Sigma_{bo},\,r_o,\,\ell_o,\,\tau_o)$:
+$\mu_{bo}\in\SE$ is the object pose in the \emph{base} frame, $\Sigma_{bo}\in
+\R^{6\times 6}$ is the body-frame tangent covariance at $\mu_{bo}$, $r_o\in
+[0,1]$ is the existence probability, $\ell_o$ a label histogram, and
+$\tau_o$ the SAM2 perception id. \emph{Base-frame storage is the canonical
+choice}: SLAM uncertainty $\Sigma_{wb}$ never enters the recursion; the world
+view is the deterministic composition $T_{wo}=T_{wb}\,\mu_{bo}$.
 
-\paragraph{2. Predict.} Two motion models, applied per-track:
-world-static (default, $u_k = T_{wb,k}^{-1}T_{wb,k-1}$, applied via
-the adjoint to $\Sigma$ plus per-phase Q) or rigid-attached
-(held set, $\delta_{bg,k} = T_{bg,k}T_{bg,k-1}^{-1}$).
+\paragraph{2. Predict.} Two motion regimes apply per track. \emph{World-static}:
+$\mu_{bo,k}=u_k\,\mu_{bo,k-1}$ with $u_k=T_{wb,k}^{-1}T_{wb,k-1}$, propagated
+through the adjoint with phase-scheduled $Q_{\text{static}}$. For tracks
+unobserved at $k{-}1$ the covariance update is \emph{skipped}, freezing
+$\Sigma_{bo}$ at the last-observed keyframe; combined with the deterministic
+mean update this preserves $T_{wo,k}=T_{wb,k_f}\,\mu_{bo,k_f}$ for static
+objects under any base motion. \emph{Rigid-attached}: held tracks evolve as
+$\mu_{bo,k}=\delta_{bg,k}\,\mu_{bo,k-1}$ with phase-aware $Q_{\text{manip}}$.
+At the holding$\to$idle (release) transition, a one-shot gravity-aware predict
+overwrites the just-released track's world-frame pose and covariance using
+voxel-occupancy-driven drop height and a per-label restitution / footprint
+table.
 
-\paragraph{3. Detection conditioning.} Subpart suppression
-(\file{det\_dedup.py}) absorbs detections whose 3D voxel sets are
-mostly contained in another's; centroid back-projection drops masks
-without valid depth.
+\paragraph{3. Detection conditioning.} Subpart suppression voxelises masks
+through depth at 2~cm and absorbs detections whose voxel sets are mostly
+contained in another's; centroid back-projection drops masks without valid
+depth.
 
-\paragraph{4. Association.} Translation-only Mahalanobis with a
-$\chi^2_3$ gate, $G_{\text{out},t}=21.108$, $R_{cam}=(0.02\,m)^2 I$.
-Hungarian on the gated cost; SAM2-id continuity bonus $\alpha=4.4$
-breaks ties.
+\paragraph{4. Association.} Translation-only Mahalanobis with a $\chi^2_3$
+gate at $G_{\text{out},t}{=}21.108$ and $R_{cam}{=}(0.02\,\mathrm{m})^2 I$,
+plus a hard Euclidean residual cap (default 0.30~m) that catches inflated
+covariances. Hungarian on the gated cost; a SAM2-id continuity bonus
+$\alpha{=}4.4$ (in $\chi^2$ units) breaks ties. A configurable label gate
+runs in either hard mode (mismatched labels become infeasible) or soft mode
+(label mismatch penalty $\beta$ + score weight $\gamma$).
 
-\paragraph{5. Update.} For matched pairs on the held track, two
-safety prefilters guard the Joseph step:
-held-prefilter (centroid-to-$T_{we}$ within 0.25~m) and
-innovation-clamp (centroid-to-$\mu_w$ within 0.20~m). The Joseph step
-runs on the \emph{translation block only}; the rotation block and
-cross-cov are left zeroed (a translation-only observation carries no
-rotation information). This keeps $\Sigma_{bo}$ PSD across long runs.
+\paragraph{5. Update.} For matched pairs on the held track, two safety
+prefilters guard the Joseph step: a held-prefilter ($\le\!0.25$~m from the
+end-effector) and an innovation clamp ($\le\!0.20$~m from $\mu_w$). The
+Joseph step runs on the \emph{translation block only}; the rotation block and
+cross-covariance are zeroed (a translation-only observation carries no
+rotation information). The world-frame view used by all downstream consumers
+is the canonical composition $T_{wo}=T_{wb}\,\mu_{bo}$ with
+$\Sigma_{wo}=\Ad(\mu_{bo}^{-1})\,\Sigma_{wb}\,\Ad(\mu_{bo}^{-1})^\top
++\Sigma_{bo}$.
 
-\paragraph{6. Birth and prune.} A confirm-3 / score-0.20 / border /
-near-live (default 5~cm; 25~cm against $T_{we}$ for the held oid)
-chain controls births. Prune when $r<10^{-3}$, except hold the held
-oid above $r=0.5$.
+\paragraph{6. Birth and prune.} A confirm-3 / score-floor / border-margin /
+near-live admission chain controls births. Survivors mint a fresh oid, run
+ICP once at admission, and seed $r_0=\lambda_b\hat s_d/(\lambda_b\hat s_d
++\lambda_c)$. Tracks prune when $r_o<10^{-3}$, except the held seed is
+floored at $r{=}0.5$.
 
-\paragraph{7. Self-merge.} Same-label tracks within 5~cm fuse via
-information sum, EXCEPT pairs in the relation-protected set
-(scene graph asserts they are distinct). The held seed is always
-the keeper.
+\paragraph{7. Self-merge.} Same-label tracks within 5~cm fuse via information
+sum, except pairs in the relation-protected set (the scene graph asserts
+they are physically distinct). The held seed is always the keeper.
 
-\paragraph{8. Relations.} A VLM/REST backend
-(\file{relation\_orchestrator.py}) is fired at first call,
-release transitions, new-oid arrivals, and every 90 frames. Its
-parent matrix is converted to \texttt{RelationEdge} records with the
-convention \textbf{parent = supported, child = supporter} (LLM's $i$
-is the supporter; we emit $(j,i,\text{on})$). A per-edge EMA
-($\alpha=0.3$, threshold $0.5$) smooths flicker.
-
-\paragraph{9. Held-set expansion.} The set carried by the gripper is
-the closure of $\{\text{held seed}\}$ under in/on edges; after each
-self-merge, EMA keys are remapped (drop $\to$ keep) so the closure
-stays valid.
+\paragraph{8. Relations and held-set expansion.} A VLM/REST backend computes
+in/on edges at first call, release transitions, new-oid arrivals, and every
+90 frames. The parent matrix is converted to edges with the convention
+\textbf{parent~=~supported, child~=~supporter}; a per-edge EMA
+($\alpha{=}0.3$, threshold $0.5$) smooths flicker. The held set is the
+closure of $\{\text{held seed}\}$ under in/on edges; after each self-merge,
+EMA keys are remapped (drop $\to$ keep) so the closure stays valid.
 
 \bigskip\hrule\bigskip
 
-\section*{Part II — Detailed Elaboration}
-\label{sec:detail}
+%=============================================================================
+\section*{Part II --- Detailed Algorithmic Exposition}
+\label{sec:algo}
+
+This part is purely algorithmic; it carries no source-file references. The
+algorithm-to-code map is in Part~III.
 
 \subsection*{II.1 State}
 
-\file{pose\_update/gaussian\_state.py}.
 $$\mathcal{S}_o = (\mu_{bo}\in\SE,\ \Sigma_{bo}\in\R^{6\times 6}_{\succeq 0},\
-  r_o\in[0,1],\ \ell_o,\ \tau_o\in\mathbb{Z},\ \text{age},\ \text{frames\_since\_obs}).$$
+  r_o\in[0,1],\ \ell_o,\ \tau_o\in\mathbb{Z},\ \text{age},\ \text{frames since obs}).$$
 
 Body-frame tangent at $\mu_{bo}$: a perturbation $\xi\in\se$ acts as
 $\mu' = \mu\,\Exp(\xi)$ (right-multiply). Ordering
-$\xi=(\xi_v;\xi_\omega)$ — \emph{translation first then rotation} (matches
-\file{pose\_update/ekf\_se3.py}, lines 5--6, 51, 108). The adjoint
+$\xi=(\xi_v;\xi_\omega)$ --- \emph{translation first, then rotation}. The
+adjoint
 $$\Ad(T) = \begin{bmatrix} R & [t]_\times R \\ 0 & R \end{bmatrix}$$
 moves a tangent vector through $T=(R,t)$.
 
 \subsection*{II.2 Predict}
 
 \textbf{World-static.} A world-static object satisfies
-$T_{wb,k}\mu_{bo,k} = T_{wb,k-1}\mu_{bo,k-1}$, hence
+$T_{wb,k}\,\mu_{bo,k} = T_{wb,k-1}\,\mu_{bo,k-1}$, hence
 $\mu_{bo,k} = u_k\,\mu_{bo,k-1}$ with
 $u_k = T_{wb,k}^{-1}T_{wb,k-1}$.
 
-The covariance recursion now branches on whether the track was
-observed last frame (\file{pose\_update/gaussian\_state.py}\,$\to$
-\texttt{predict\_static}, with caller-supplied
-\texttt{unobserved\_oids}):
+The covariance recursion branches on whether the track was observed at
+$k{-}1$:
 \begin{equation}\label{eq:proc}
 \Sigma_{bo,k} \;=\;
 \begin{cases}
@@ -127,224 +145,194 @@ observed last frame (\file{pose\_update/gaussian\_state.py}\,$\to$
 \Sigma_{bo,k-1} & \text{unobserved at } k{-}1 \text{ (frozen keyframe)}.
 \end{cases}
 \end{equation}
-The mean update $\mu_{bo,k}=u_k\mu_{bo,k-1}$ runs in \emph{both}
-branches, deterministically. $Q_{\text{static}}$ schedules on
-\texttt{frames\_since\_obs}: $1\!{\rm e}{-6}I_6$ (idle, $<5$),
-$1\!{\rm e}{-5}I_6$ ($<50$), $1\!{\rm e}{-8}I_6$ thereafter
-(\file{ekf\_se3.py}\,$\to$ \texttt{process\_noise\_for\_phase}).
-$\Phi$ is the optional covariance-saturation operator
-(\file{ekf\_se3.py}\,$\to$ \texttt{saturate\_covariance})
+The mean update $\mu_{bo,k}=u_k\mu_{bo,k-1}$ runs in \emph{both} branches,
+deterministically. $Q_{\text{static}}$ is scheduled on frames since the
+last observation: $1{\rm e}{-}6\,I_6$ (idle, $<5$),
+$1{\rm e}{-}5\,I_6$ ($<50$), $1{\rm e}{-}8\,I_6$ thereafter.
+$\Phi$ is the optional covariance saturation
 \begin{equation}\label{eq:phi}
 \Phi(P) \;=\; \min\!\bigl(1,\;\Tr P_{\max}/\Tr P\bigr)\,P,
 \end{equation}
-inactive when \texttt{cfg.P\_max} is \texttt{None} (the default).
-Bernoulli predict on existence is
+inactive when no cap is configured (the default). The Bernoulli predict on
+existence is
 \begin{equation}\label{eq:bern_pred_r}
-r_{k|k-1} = p_s\,r_{k-1|k-1}, \qquad p_s = 1 \text{ default}
+r_{k|k-1} = p_s\,r_{k-1|k-1}, \qquad p_s = 1 \text{ default}.
 \end{equation}
-(\file{bernoulli.py}\,$\to$\,\texttt{r\_predict}).
 
-\paragraph{Why the unobserved branch freezes $\Sigma_{bo}$ (keyframe
+\paragraph{Why the unobserved branch freezes $\Sigma_{bo}$ (the keyframe
 mechanism).}
 The Ad-conjugate transport carries a cross-coupling
 $[t(u_k)]_\times P_{rr}[t(u_k)]_\times^\top$ that pumps rotation
-uncertainty into the translation block each frame. For tracks with
-high $\sigma_{yaw}$ (e.g.\ a freshly-released bottle at
-$\sigma_{yaw}=\pi$ from \eqref{eq:gravity_sigma}), the per-frame
-contribution $\Delta x^2\!\cdot\!\pi^2$ compounds catastrophically
-($\sim 1.2\,$m over 60 frames at apple\_drop). The keyframe-mechanism
-fix exploits the algebraic identity that, telescoping the
-deterministic mean update over $K$ frames since the last observation
-at $k_f$,
+uncertainty into the translation block each frame. For tracks with high
+$\sigma_{yaw}$ (e.g.\ a freshly-released object with $\sigma_{yaw}=\pi$
+from the gravity prior, \eqref{eq:gravity_sigma}), the per-frame
+contribution $\Delta x^2\!\cdot\!\pi^2$ compounds catastrophically (order
+of one metre over a few dozen frames). The keyframe mechanism exploits the
+algebraic identity that, telescoping the deterministic mean update over
+$K$ frames since the last observation at $k_f$,
 \begin{equation}\label{eq:telescope}
 \mu_{bo,K} \;=\; u_K \cdots u_{k_f+1}\,\mu_{bo,k_f}
             \;=\; T_{wb,K}^{-1}\,T_{wb,k_f}\,\mu_{bo,k_f}.
 \end{equation}
 Composing with the current SLAM pose then gives
-$T_{wo,K}=T_{wb,K}\mu_{bo,K}=T_{wb,k_f}\mu_{bo,k_f}$ — \emph{constant}
-for a static object, exactly as required. The keyframe is not stored
-explicitly; $\Sigma_{bo,K}=\Sigma_{bo,k_f}$ is preserved by skipping
-the cov update. World composition (\eqref{eq:world_compose} in §II.5)
+$T_{wo,K}=T_{wb,K}\mu_{bo,K}=T_{wb,k_f}\mu_{bo,k_f}$ --- \emph{constant} for
+a static object, exactly as required. The keyframe is not stored
+explicitly; $\Sigma_{bo,K}=\Sigma_{bo,k_f}$ is preserved by skipping the
+covariance update. World composition (\S II.5, \eqref{eq:world_compose})
 then uses the \emph{current} $\Sigma_{wb,K}$ for the lever-arm
 contribution, so the world-frame uncertainty grows only via the SLAM
-marginal — never via per-frame predict drift. Verified to machine
-precision on apple\_drop oid=1 (fso=224 frames):
-$\|\mu_{bo,K} - T_{wb,K}^{-1}T_{wb,k_f}\mu_{bo,k_f}\|=2.22\!\cdot\!10^{-14}$.
+marginal --- never via per-frame predict drift.
 
 \textbf{Rigid-attached.} For tracks in the held set $\mathcal{H}_k$,
 $\mu_{bo,k} = \delta_{bg,k}\,\mu_{bo,k-1}$ with
-$\delta_{bg,k} = T_{bg,k}T_{bg,k-1}^{-1}$. The driver applies a
-phase-aware $Q_{\text{manip}}$:
-\begin{itemize}
-\item Seed during grasping/releasing: $\mathrm{diag}((0.02)^2{\times}3,\,(0.10)^2{\times}3)$ — physical grip-slack.
-\item Seed during holding: $\mathrm{diag}(2.5\!{\rm e}{-4}{\times}3,\,1\!{\rm e}{-3}{\times}3)$ — settled grip.
-\item Transitive members (apples on tray): always the holding row — they don't deform when the gripper closes around the seed.
+$\delta_{bg,k} = T_{bg,k}T_{bg,k-1}^{-1}$. A phase-aware $Q_{\text{manip}}$
+applies:
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Seed during grasping/releasing: $\mathrm{diag}((0.02)^2{\times}3,\,(0.10)^2{\times}3)$ --- physical grip slack.
+\item Seed during holding: $\mathrm{diag}(2.5{\rm e}{-}4{\times}3,\,1{\rm e}{-}3{\times}3)$ --- settled grip.
+\item Transitive members of the held set (e.g.\ items resting on a held tray): always the holding row --- they don't deform when the gripper closes around the seed.
 \end{itemize}
-The held branch still runs the full Ad-conjugate (no
-keyframe-mechanism shortcut), so the same translation/rotation
-cross-pumping applies — bounded in practice by
-$\|t(\delta_{bg,k})\|\!\ll\!1$ but \emph{not} eliminated. Edge cases
-with $\sigma_{yaw}\!\to\!\pi$ inside the holding window
-(re-grasps, release-transition) remain a known caveat; cap-rotation
-mitigations are an open item.
+The held branch runs the full Ad-conjugate (no keyframe-mechanism shortcut),
+so the same translation/rotation cross-pumping applies --- bounded in
+practice by $\|t(\delta_{bg,k})\|\!\ll\!1$ but \emph{not} eliminated. Edge
+cases with $\sigma_{yaw}\!\to\!\pi$ inside the holding window (re-grasps,
+release transitions) remain a known caveat.
 
 \subsection*{II.3 Detection conditioning}
 
-\textbf{Subpart suppression} (\file{det\_dedup.py}).
-Voxelise each mask through depth at 2~cm; for ordered pair $(a,b)$
-with $|V_b|\le|V_a|$, if $|V_b\cap V_a|/|V_b|>0.8$, absorb $b$ into $a$
-(label histograms merge). Catches SAM2 mask splits / re-prompts.
+\textbf{Subpart suppression.} Voxelise each mask through depth at 2~cm; for
+ordered pair $(a,b)$ with $|V_b|\le|V_a|$, if $|V_b\cap V_a|/|V_b|>0.8$,
+absorb $b$ into $a$ (label histograms merge). This catches SAM mask splits
+and re-prompts.
 
-\textbf{Centroid validity}.
+\textbf{Centroid validity.}
 $c_d^{\text{cam}} = \frac{1}{|m_d\cap\text{valid-depth}|}\sum_{p\in m_d}\mathrm{back\_project}(p,\mathrm{depth},K)$.
-If the mask has no valid-depth pixels, $d$ is dropped (logged in
-\texttt{centroid\_dropped}).
+If the mask has no valid-depth pixels, $d$ is dropped.
 
 \subsection*{II.4 Association}
 
-\file{pose\_update/association.py}\,$\to$\,\texttt{hungarian\_associate}.
 For each $(o,d)$:
 \begin{align*}
   t_{bo}^{\text{meas}} &= T_{bc}\bigl[c_d^{\text{cam}}; 1\bigr]_{1:3} \\
-  R_{bo}^t &= R_{bc}\,R_{cam}\,R_{bc}^\top, \quad R_{cam} = \mathrm{diag}((0.02\,m)^2{\times}3) \\
+  R_{bo}^t &= R_{bc}\,R_{cam}\,R_{bc}^\top, \quad R_{cam} = \mathrm{diag}((0.02\,\mathrm{m})^2{\times}3) \\
   \nu_{od} &= t_{bo}^{\text{meas}} - \mu_{bo}[1{:}3, 4],\quad
   S_{od} = P_{tt,o} + R_{bo}^t \\
   d^2_{t,od} &= \nu_{od}^\top S_{od}^{-1} \nu_{od}.
 \end{align*}
 
 \paragraph{Cost.}
-Two modes, selected by \texttt{BernoulliConfig.enforce\_label\_match}:
+Two modes, selected by a label-enforcement flag:
 \begin{equation}\label{eq:cost_sam2}
 C_{od} \;=\; d^2_{t,od}
   \;-\;\alpha_{\text{SAM2}}\,\bm 1[\tau_o = \mathrm{pid}_d,\ \tau_o\ge 0]
   \;+\;\beta\,\bm 1[\hat\ell_d \notin \mathcal H_o]
   \;+\;\gamma\,\max(0,\,1-\hat s_d).
 \end{equation}
-\textbf{Hard label gate} (\texttt{enforce\_label\_match=True}, paper
-baseline): $\beta = \gamma = 0$, and any cell with mismatched label is
-forced to the sentinel $\_\text{INFEASIBLE}=10^{12}$ (big-M).
-\textbf{Soft mode} (\texttt{enforce\_label\_match=False}, used by
-\file{tests/visualize\_ekf\_tracking.py}): $\beta=$
-\texttt{hungarian\_label\_penalty} (default 0.0; visualizer sets 6.0)
-and $\gamma=$ \texttt{hungarian\_score\_weight} (default 0.0; visualizer
-sets 2.0). $\alpha_{\text{SAM2}}=4.4$ in either mode (continuity bonus).
+\textbf{Hard label gate} (paper baseline): $\beta=\gamma=0$, and any cell
+with mismatched label is forced to a sentinel infeasible value.
+\textbf{Soft mode}: $\beta$ is a configurable label penalty (default 0.0;
+the production driver sets 6.0) and $\gamma$ is a configurable score weight
+(default 0.0; production sets 2.0). $\alpha_{\text{SAM2}}=4.4$ in either
+mode.
 
-\paragraph{Label-purity gate} (soft mode only).
-The membership test $\hat\ell_d \in \mathcal H_o$ is not pure dict
-membership: it is the helper
-\texttt{\_label\_in\_history\_meaningful(t\_history, d\_label, min\_obs=5,
-min\_share=0.05)} in \file{association.py}. A label is considered
-``meaningfully in the history'' iff it has $\ge 5$ observations \emph{and}
-$\ge 5\%$ of the total. This rejects stale trace-amount labels (e.g.\
-3 obs against 53\,990 → \texttt{False}) that would otherwise bypass the
-$\beta$ penalty.
+\paragraph{Label-purity gate (soft mode only).}
+The membership test $\hat\ell_d \in \mathcal H_o$ is not pure dictionary
+membership; a label is ``meaningfully in the history'' iff it has $\ge\!5$
+observations \emph{and} $\ge\!5\%$ of the total. This rejects stale
+trace-amount labels (e.g.\ 3 obs against 53\,990) that would otherwise bypass
+the $\beta$ penalty.
 
-\paragraph{Outer gate.}
+\paragraph{Outer gates.}
 The Hungarian solver minimises $\sum C_{o\sigma(o)}$. Two gates apply:
 \begin{enumerate}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
-\item Probabilistic chi$^2$: $d^2_{t,od} > G_{\text{out},t}=21.108$
-  ($\chi^2_3$ at $99.97\%$) → cell infeasible.
-\item Hard Euclidean residual cap: $\|\nu_{od}\|_2 > $
-  \texttt{cfg.max\_residual\_m} → cell infeasible. Default $0.30$\,m;
-  set \texttt{None} to disable. Catches the inflated-covariance
-  pathology where, after a long miss run with $\sigma_t \approx 0.4$\,m,
-  a $0.86$\,m residual gives $d^2_t \approx 17 < 21.108$ and the chi$^2$
-  gate becomes meaningless.
+\item Probabilistic $\chi^2_3$: $d^2_{t,od} > G_{\text{out},t}=21.108$
+  (i.e.\ at $99.97\%$) $\Rightarrow$ cell infeasible.
+\item Hard Euclidean residual cap: $\|\nu_{od}\|_2$ above a configurable
+  threshold (default $0.30$~m; \texttt{None} disables) $\Rightarrow$ cell
+  infeasible. This catches the inflated-covariance pathology where, after
+  a long miss run with $\sigma_t\!\approx\!0.4$~m, an $0.86$~m residual gives
+  $d^2_t\!\approx\!17 < 21.108$ and the $\chi^2$ gate becomes meaningless.
 \end{enumerate}
 \begin{equation}\label{eq:hung}
 \sigma^* = \arg\min_\sigma \sum_{o} C_{o\,\sigma(o)},\qquad
-\text{drop } (o,d) \text{ if } C_{od} \ge \_\text{INFEASIBLE}.
+\text{drop } (o,d) \text{ if } C_{od} \text{ is infeasible}.
 \end{equation}
 
 \subsection*{II.5 Update}
 
-\textbf{Held-track prefilters} (\file{visualize\_ekf\_tracking.py},
-matched-update branch). For each accepted match $(o,d)$ with $o$ the
-held seed:
-\begin{itemize}
+\textbf{Held-track prefilters.} For each accepted match $(o,d)$ where $o$ is
+the held seed:
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
 \item Held-prefilter: $\|c_d^w - (T_{wb}T_{bg})_{1:3,4}\|_2 \le 0.25$~m.
 \item Innovation clamp: $\|c_d^w - (T_{wb}\mu_{bo})_{1:3,4}\|_2 \le 0.20$~m.
 \end{itemize}
-A failure marks the detection consumed (so it doesn't re-birth) and
-skips the EKF step; the rigid-attach predict carries the track.
+A failure marks the detection consumed (so it does not re-birth) and skips
+the EKF step; the rigid-attach predict carries the track.
 
-\textbf{Joseph step (translation-only)}, \file{gaussian\_state.py}\,$\to$
-\texttt{update\_observation\_centroid}. Let $K_{tt} = P_{tt}\,S^{-1}$ ($3\times 3$):
+\textbf{Joseph step (translation-only).} Let $K_{tt} = P_{tt}\,S^{-1}$
+($3\times 3$):
 \begin{align*}
   \delta_t^{\text{base}} &= K_{tt}\,\nu \\
   \mu_{bo}[1{:}3, 4] &\leftarrow \mu_{bo}[1{:}3, 4] + \delta_t^{\text{base}} \\
   P_{tt}^{\text{post}} &= (I - K_{tt})\,P_{tt}\,(I - K_{tt})^\top + K_{tt}\,R_{bo}^t\,K_{tt}^\top \\
   \Sigma_{bo}^{\text{post}} &= \mathrm{block\!-\!diag}\bigl(P_{tt}^{\text{post}},\ P_{rr}\bigr).
 \end{align*}
-The cross-covariance is zeroed: a translation-only observation
-provides no information about rotation (we set $R_{rot}=\infty$),
-so the honest posterior is block-diagonal. An earlier version
-preserved the prior cross-cov, which broke
-$P_{rr}-P_{rt}^\top P_{tt}^{-1}P_{rt}\succeq 0$ over many updates;
-the refactored version is PSD by construction, with an
-\texttt{eigh}-clip belt-and-suspenders.
+The cross-covariance is zeroed: a translation-only observation provides no
+information about rotation (we set $R_{rot}=\infty$), so the honest
+posterior is block-diagonal. An earlier version preserved the prior
+cross-covariance, which broke the Schur condition
+$P_{rr}-P_{rt}^\top P_{tt}^{-1}P_{rt}\succeq 0$ over many updates; the
+current version is PSD by construction, with an eigenvalue clip as a
+belt-and-suspenders.
 
-For pairs where ICP succeeded (\file{icp\_pose.py}), an alternative
-full-$\SE$ update via \texttt{joseph\_update} in
-\file{object\_belief.py} replaces the centroid path. The lift to base
-frame is
+For pairs where ICP succeeded, an alternative full-$\SE$ update via the
+Joseph form on the $6$-D innovation lifts the camera-frame measurement to
+base frame:
 \begin{equation}\label{eq:meas_compose}
 T_{bo}^{\text{meas}} = T_{bc}\,\hat T^{co}, \qquad
 R^{bo} = \Ad(T_{bc})\,\hat R^{co}\,\Ad(T_{bc})^\top,
 \end{equation}
-followed by IEKF inner iterations and the Joseph form
-(\file{ekf\_se3.py}\,$\to$\,\texttt{ekf\_update};
-\file{object\_belief.py}\,$\to$\,\texttt{joseph\_update};
-\file{ekf\_se3.py}\,$\to$\,\texttt{huber\_weight} for the
-inner soft / outer hard reweighting on $d^2_t$, \eqref{eq:huber_w}). The
-EKF likelihood used by \eqref{eq:r_assoc} is
+followed by IEKF inner iterations and Huber inner / outer reweighting
+(\eqref{eq:huber_w}). The EKF likelihood used by \eqref{eq:r_assoc} is
 \begin{equation}\label{eq:ekf_lik}
 \log\mathcal L = -\tfrac{1}{2}\bigl(\nu^\top S^{-1}\nu + \log\det(2\pi S)\bigr),
 \end{equation}
-computed in log-space to avoid underflow at $\log\mathcal L\sim -50$.
+computed in log space to avoid underflow at $\log\mathcal L\sim -50$.
 
 \paragraph{World-frame composition.}\label{sec:world_compose}
-\file{gaussian\_state.py}\,$\to$\,\texttt{collapsed\_object\_world}
-returns the canonical world-frame view consumed by every downstream
-client (relations, slow tier, gravity-predict input, visualizer):
+The canonical world-frame view consumed by every downstream client
+(relations, slow tier, gravity-predict input, visualizer) is
 \begin{equation}\label{eq:world_compose}
 \mu_{wo} = T_{wb}\,\mu_{bo}, \qquad
 \Sigma_{wo} = \Ad(\mu_{bo}^{-1})\,\Sigma_{wb}\,\Ad(\mu_{bo}^{-1})^\top
               + \Sigma_{bo}.
 \end{equation}
-$\Sigma_{wb}$ is read from the current SLAM marginal at query time, so
-the world cov tracks any SLAM drift / loop-closure shift even when no
-new object observation has arrived. Combined with the
-keyframe-mechanism freeze of $\Sigma_{bo}$ (\eqref{eq:proc}), an
-unobserved static track's world cov grows \emph{only} via the
-$\Sigma_{wb}$-lever — the user-intended behaviour.
+$\Sigma_{wb}$ is read from the current SLAM marginal at query time, so the
+world-cov tracks any SLAM drift / loop-closure shift even when no new
+object observation has arrived. Combined with the keyframe-mechanism freeze
+of $\Sigma_{bo}$ (\eqref{eq:proc}), an unobserved static track's world cov
+grows \emph{only} via the $\Sigma_{wb}$ lever --- the user-intended
+behaviour.
 
 \paragraph{World-frame overwrite (release hook).}
-\file{gaussian\_state.py}\,$\to$\,\texttt{overwrite\_object\_pose(oid,
-$T_{wo}$, $P_{wo}$)} forces the EKF state for one oid from a
-world-frame $(T,P)$ input. Used by \file{orchestrator\_gaussian.py}
-$\to$\,\texttt{\_maybe\_gravity\_predict} (and the RBPF analogue in
-\file{orchestrator.py}) at the release transition to install
-\eqref{eq:gravity_sigma}'s landing prior. The body-frame storage
-becomes $\mu_{bo}=T_{wb}^{-1}T_{wo}$ and $\Sigma_{bo}=P_{wo}$ (the
-right-trivialised tangent transport reduces to the identity at the
-new $\mu_{bo}$). After the overwrite, the keyframe-mechanism freeze
-in \eqref{eq:proc} keeps the gravity-supplied cov
-($\sigma_{yaw}=\pi$, $\sigma_{xy}\!\sim\!5$–$10\,$cm) intact across
+A pose-overwrite primitive forces the EKF state for one oid from a
+world-frame $(T_{wo},P_{wo})$ input. It is invoked at the release transition
+to install the gravity-aware landing prior (\eqref{eq:gravity_sigma}); the
+body-frame storage becomes $\mu_{bo}=T_{wb}^{-1}T_{wo}$ and
+$\Sigma_{bo}=P_{wo}$ (the right-trivialised tangent transport reduces to the
+identity at the new $\mu_{bo}$). After the overwrite, the keyframe-mechanism
+freeze in \eqref{eq:proc} keeps the gravity-supplied covariance
+($\sigma_{yaw}=\pi$, $\sigma_{xy}\!\sim\!5$--$10$~cm) intact across
 subsequent unobserved frames.
 
 \paragraph{Per-track observation chain (diagnostic).}\label{sec:chain}
 Each track also accumulates an append-only chain
 $\mathcal{H}^{(i)} = [(\,k,\hat T^{co}_k,\hat R^{co}_k\,),\ldots]$ of
-camera-frame ICP measurements (\file{pose\_update/obs\_chain.py}).
-\textbf{The chain is NOT the canonical world-frame source} — that
-role belongs to \texttt{collapsed\_object\_world}
-(\eqref{eq:world_compose}). The chain is computed in parallel by the
-visualizer (\file{tests/visualize\_ekf\_tracking.py}) for
-cross-checking and is the natural substrate for a future
-loop-closure-aware smoother (the slow-tier
-\file{pose\_update/factor\_graph.py} consumes the same structure when
-promoted).
+camera-frame ICP measurements. \textbf{The chain is NOT the canonical
+world-frame source} --- that role belongs to the world composition
+\eqref{eq:world_compose}. The chain is computed in parallel by the
+visualizer for cross-checking and is the natural substrate for a future
+loop-closure-aware smoother.
 
 \paragraph{Huber reweight.}
 \begin{equation}\label{eq:huber_w}
@@ -359,68 +347,57 @@ $G_{\text{out},t}=21.108$.
 
 \subsection*{II.6 Birth and prune}
 
-Birth gates (\file{orchestrator.py}\,$\to$ \texttt{birth\_admissible}
-and \file{birth\_gating.py}\,$\to$ \texttt{is\_near\_live\_track}):
-\begin{enumerate}
-\item Border: bbox not within \texttt{birth\_border\_margin\_px}=2~px of edge.
-\item Confirm-$k$: tracker-side pending counter $\ge k = $
-  \texttt{birth\_confirm\_k}=3 (counts the tracker's unmatched-streak
-  frames, not perception's $n_{\text{obs}}$ which resets on SAM2 id reissue).
-\item Score floor: rolling-max score $\ge $ \texttt{birth\_score\_min}=0.20.
-\item Near-live: world-frame centroid $> $ \texttt{birth\_min\_dist\_m}=0.05~m
-  from any same-label live track. For the held oid the radius widens to
-  \texttt{held\_birth\_radius\_m}=0.25~m and $T_{we}$ is checked as a
-  secondary anchor.
-\item TTL: pending entries that go \texttt{birth\_pending\_ttl\_frames}=30
-  frames without a matching arrival are evicted (one second at 30\,Hz;
-  survives short perception dropouts).
+Birth gates:
+\begin{enumerate}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Border: bbox not within $2$~px of the image edge.
+\item Confirm-$k$: tracker-side pending counter $\ge k=3$ (counts the
+  tracker's unmatched-streak frames, not perception's $n_{\text{obs}}$ which
+  resets on SAM2 id reissue).
+\item Score floor: rolling-max score $\ge 0.20$.
+\item Near-live: world-frame centroid $> 0.05$~m from any same-label live
+  track. For the held oid the radius widens to $0.25$~m and $T_{we}$ is
+  checked as a secondary anchor.
+\item TTL: pending entries that go $30$ frames without a matching arrival
+  are evicted (one second at $30$~Hz).
 \end{enumerate}
-Survivors mint a fresh oid via \texttt{\_next\_track\_id()}, run ICP
-once on admission (\file{icp\_pose.py}\,$\to$\,\texttt{PoseEstimate.estimate}
-with \texttt{T\_co\_init=None}), and seed
+Survivors mint a fresh oid, run ICP once on admission, and seed
 \begin{equation}\label{eq:birth_r}
-r_0 \;=\; \frac{\lambda_b\,\hat s_d}{\lambda_b\,\hat s_d + \lambda_c}
+r_0 \;=\; \frac{\lambda_b\,\hat s_d}{\lambda_b\,\hat s_d + \lambda_c}.
 \end{equation}
-(\file{bernoulli.py}\,$\to$\,\texttt{r\_birth}; defaults
-$\lambda_b=\lambda_c=1$ → $r_0=\hat s_d$). Birth covariance defaults to
+Birth covariance defaults to
 \begin{equation}\label{eq:birth_state}
-P_{\text{new}} = \hat R^{co} \quad (\texttt{init\_cov\_from\_R=True}, \text{default})
+P_{\text{new}} = \hat R^{co}\quad (\text{from ICP, by default})
 \end{equation}
-and falls back to $\mathrm{diag}((5\,\text{cm})^2{\times}3,(0.05\,\text{rad})^2{\times}3)$
-when \texttt{init\_cov\_from\_R=False}.
+and falls back to
+$\mathrm{diag}((5\,\text{cm})^2{\times}3,(0.05\,\text{rad})^2{\times}3)$
+when the ICP-derived form is disabled.
 
 \paragraph{Existence updates.}
-For matched pairs (\eqref{eq:r_assoc};
-\file{bernoulli.py}\,$\to$\,\texttt{r\_assoc\_update\_loglik})
+For matched pairs
 \begin{equation}\label{eq:r_assoc}
 r' = \frac{(1 - p_s) + p_s\,p_d\,\mathcal L\,r}{1 - p_s + p_s\,r},
 \end{equation}
-and for missed tracks (\eqref{eq:r_miss};
-\file{bernoulli.py}\,$\to$\,\texttt{r\_miss\_update}; $\tilde p_d = p_d\,p_v$)
+and for missed tracks (with $\tilde p_d = p_d\,p_v$)
 \begin{equation}\label{eq:r_miss}
 r' = \frac{(1 - \tilde p_d)\,r}{1 - \tilde p_d\,r},
 \end{equation}
-with $p_v$ from \file{pose\_update/visibility.py} (see \eqref{eq:pv}).
+with $p_v$ the visibility probability of \eqref{eq:pv}.
 
 \paragraph{Prune.}
-$r_o < $ \texttt{r\_min}=$10^{-3}$ deletes, EXCEPT the held seed, whose
-existence is floored at \texttt{r\_held\_floor}=0.5 (survives long
-held-occlusion).
+$r_o < 10^{-3}$ deletes the track, EXCEPT the held seed, whose existence is
+floored at $0.5$ (survives long held-occlusion).
 
 \subsection*{II.7 Self-merge}
 
-\file{orchestrator.py}\,$\to$\,\texttt{\_self\_merge\_pass}. Inputs:
-held seed $s$, protected pairs $\mathcal P$ derived from the relation
-edge set $\mathcal E$ emitted by \file{relation\_orchestrator.py}
-(\S II.8) — the parent/child convention is
-\emph{parent = supported, child = supporter}, so a relation
-$(p,c,\text{on})$ contributes the unordered pair
-$(\min(p,c),\max(p,c))$ to $\mathcal P$:
+Inputs: the held seed $s$, and protected pairs $\mathcal P$ derived from the
+relation edge set $\mathcal E$ (\S II.9). The parent/child convention is
+\emph{parent~=~supported, child~=~supporter}, so a relation $(p,c,\text{on})$
+contributes the unordered pair $(\min(p,c),\max(p,c))$ to $\mathcal P$:
 \begin{equation*}
 \mathcal{P} = \bigl\{\,(\min(p,c),\max(p,c))\;:\;(p,c,\cdot)\in\mathcal{E}\,\bigr\}.
 \end{equation*}
-Same-label pairs in $\mathcal P$ are protected from collapse — the scene
-graph asserts they are physically distinct (apple-on-tray, etc.).
+Same-label pairs in $\mathcal P$ are protected from collapse --- the scene
+graph asserts they are physically distinct (item-on-tray, etc.).
 Information-sum fusion (with the keep mean as linearisation point) is
 \begin{equation}\label{eq:self_merge_info}
 \begin{aligned}
@@ -442,75 +419,63 @@ P^{-1}_{\text{new}} &= P^{-1}_{\text{keep}} + P^{-1}_{\text{drop}}, \\
 \For{each $(d, d^2_t, o_i, o_j)$}
   \If{$o_i$ or $o_j$ already absorbed} \textbf{continue} \EndIf
   \State Choose keep$\gets s$ if $s\in\{o_i,o_j\}$, else higher-$r$, else lower oid.
-  \State Information-sum-fuse $\mu, \Sigma$; merge label histograms / sam2\_tau / T\_oe / r.
+  \State Information-sum fuse $\mu, \Sigma$; merge label histograms / SAM2 id / $T_{oe}$ / $r$.
   \State Append \{keep, drop, $d$, $d^2_t$\} to merges.
 \EndFor
 \end{algorithmic}
 \end{algorithm}
-The protected-pairs gate is what stops an apple-on-tray pair from
-collapsing once their world centroids drift within 5~cm under
-occlusion bias.
+The protected-pairs gate is what stops a same-label item-on-tray pair from
+collapsing once their world centroids drift within 5~cm under occlusion
+bias.
 
 \subsection*{II.8 Visibility}\label{sec:vis}
 
-\file{pose\_update/visibility.py}\,$\to$\,\texttt{visibility\_p\_v}.
 For each track $i$, sample object-surface points
-$\{x_j^{(i)}\}_{j=1}^M$ (paper specifies projecting the TSDF shape
-summary $\mathcal{G}^{(i)}$; current implementation uses a Fibonacci
-sphere of radius $r_{\text{obj}}$ around $\mu_{bo}$). Lift each through
-$T_{bc}$ into camera, depth-test against the current depth image:
+$\{x_j^{(i)}\}_{j=1}^M$ on a Fibonacci sphere of radius $r_{\text{obj}}$
+around $\mu_{bo}$ (the paper specifies projecting the per-object TSDF
+shape summary; the current implementation uses the spherical fallback).
+Lift each through $T_{bc}$ into camera, depth-test against the current depth
+image:
 \begin{equation}\label{eq:pv}
 p_v^{(i)} \;=\;
 \frac{\#\bigl\{j : x_j^{(i)} \text{ in-frustum and passes depth test}\bigr\}}
      {\#\bigl\{j : x_j^{(i)} \text{ in-frustum}\bigr\}}
 \quad\in\;[0,1].
 \end{equation}
-$p_v=1$ when no in-frustum sample is occluded (fully visible / no
-evidence of occlusion); $p_v=0$ when fully out-of-FOV or fully occluded.
-The continuous probability composes naturally with \eqref{eq:r_miss};
-the four-state machine (present / occluded / absent / not-in-view)
-collapses into a single weight on the miss-frame likelihood.
+$p_v=1$ when no in-frustum sample is occluded; $p_v=0$ when fully
+out-of-frustum or fully occluded. The continuous probability composes
+naturally with \eqref{eq:r_miss}; the four-state machine
+(present~/~occluded~/~absent~/~not-in-view) collapses into a single weight
+on the miss-frame likelihood.
 
 \subsection*{II.9 Relations}
 
-\textbf{Trigger gate}
-(\file{relation\_utils.py}\,$\to$\,\texttt{should\_recompute\_relations}):
-fires at first call, release transitions, new-oid arrivals, or every
-\texttt{relation\_every\_n\_frames}=90 frames. The grasp-transition
-trigger was removed (LLM at grasp onset has incomplete information).
+\textbf{Trigger gate.} The relation backend fires at first call, at release
+transitions, on new-oid arrivals, or every 90 frames. The grasp-transition
+trigger was removed (the backend at grasp onset has incomplete information).
 
-\textbf{Backend} (\file{relation\_orchestrator.py}\,+\,\file{relation\_client.py}).
-On a triggered frame, the orchestrator builds normalised bboxes per
-oid (from \texttt{det\_to\_oid}) and calls
-\texttt{LLMRelationClient} or \texttt{RESTRelationClient}. The
-backend returns $p\in[0,1]^{N\times N}$ with $p_{ij}$ = ``$j$ rests
-on $i$''. Disk cache (\texttt{CachedRelationClient}) keyed by
-$(\text{frame},N,\text{rounded bboxes})$.
+\textbf{Backend.} On a triggered frame, the orchestrator builds normalised
+bboxes per oid (from the detection-to-oid map) and calls a VLM (LLM-based)
+or REST relation client. The backend returns $p\in[0,1]^{N\times N}$ with
+$p_{ij}$ = ``$j$ rests on $i$''. A disk cache keyed by
+$(\text{frame}, N, \text{rounded bboxes})$ is read on retry.
 
-\textbf{Convention swap}. Held-set expansion uses
-parent=supported, child=supporter. The LLM's $(i,j)$ encodes the
-opposite ($j$ rests on $i$). Edge emission swaps:
+\textbf{Convention swap.} Held-set expansion uses parent~=~supported,
+child~=~supporter. The backend's $(i,j)$ encodes the opposite ($j$ rests on
+$i$). Edge emission swaps:
 $$\mathrm{edge} = \mathrm{RelationEdge}(\text{parent}=j,\text{child}=i,\text{type}=\text{on},\text{score}=p_{ij}).$$
-A regression here was responsible for held-set expansion failing —
-the closure walks edges with $\text{child}\in S$, so a backward
-emission means no propagation.
 
-\textbf{EMA}
-(\file{orchestrator.py}\,$\to$\,\texttt{RelationFilter}). For each
-key $k=(\text{parent},\text{child},\text{type})$:
+\textbf{EMA.} For each key $k=(\text{parent},\text{child},\text{type})$:
 $$\mathrm{ema}_k(t) = \alpha\,\mathrm{raw}_k(t) + (1-\alpha)\,\mathrm{ema}_k(t-1),\quad \alpha=0.3.$$
-Edges emitted when $\mathrm{ema}\ge 0.5$; pruned when
-$\mathrm{ema}\le 0.01$. Half-life $\sim 2$ trigger calls
-$\sim 180$ frames.
+Edges emit when $\mathrm{ema}\ge 0.5$ and prune when $\mathrm{ema}\le
+0.01$. Half-life is $\sim\!2$ trigger calls $\sim\!180$ frames at 30~Hz.
 
-\textbf{Remap after merges}. When self-merge produces
-$\{(\text{drop}_i,\text{keep}_i)\}$, every EMA key and emitted edge
-has parent/child rewritten via the closure of \texttt{drop\_to\_keep}.
+\textbf{Remap after merges.} When self-merge produces
+$\{(\text{drop}_i,\text{keep}_i)\}$, every EMA key and emitted edge has
+parent/child rewritten via the closure of \texttt{drop\_to\_keep}.
 Self-loops drop, duplicate keys merge by max.
 
 \subsection*{II.10 Held-set expansion}\label{sec:held}
-
-\file{relation\_utils.py}\,$\to$\,\texttt{expand\_held\_with\_relations}.
 
 \begin{algorithm}[H]
 \begin{algorithmic}[1]
@@ -525,40 +490,34 @@ Self-loops drop, duplicate keys merge by max.
 \State \textbf{return} $S$
 \end{algorithmic}
 \end{algorithm}
-The caller post-filters $S$ against currently-live oids to drop
-references to pruned tracks the EMA hasn't yet decayed.
+The caller post-filters $S$ against currently-live oids to drop references
+to pruned tracks the EMA has not yet decayed.
 
 \subsection*{II.11 Gravity-aware predict at release}\label{sec:gravity}
 
-When the gripper releases an object, the rigid-attachment predict no
-longer applies and the static predict over-states the prior (the
-object physically falls). This subsystem replaces the EKF mean and
-covariance for the just-released oid with the post-settling
-prediction in a single step at the
+When the gripper releases an object, the rigid-attachment predict no longer
+applies and the static predict over-states the prior (the object physically
+falls). This subsystem replaces the EKF mean and covariance for the
+just-released oid with the post-settling prediction in a single step at the
 $\textsc{Releasing}\!\to\!\textsc{Idle}$ transition.
 
 \paragraph{Voxel observability.}
-\file{pose\_update/voxel\_observability.py} maintains a dense 3-state
-grid (\textsc{Unseen}\,/\,\textsc{Empty}\,/\,\textsc{Occupied}) plus
-per-voxel \texttt{n\_hit} + \texttt{n\_pass} counters with hysteresis
-($\ge $ \texttt{n\_min\_hit}=2 confirming hits and $\ge $
-\texttt{n\_min\_pass}=3 pass-through rays before transition). Updated
-each frame from depth: each pixel's ray marks voxels traversed before
-the depth hit as pass-pending and the voxel at the hit as
-hit-pending. Default workspace $5\,\text{m}\times 5\,\text{m}\times
-3\,\text{m}$ at $5\,\text{cm}$ voxel size.
+A dense 3-state grid (\textsc{Unseen}\,/\,\textsc{Empty}\,/\,\textsc{Occupied})
+plus per-voxel hit/pass counters with hysteresis ($\ge\!2$ confirming hits
+and $\ge\!3$ pass-through rays before transition) is updated each frame
+from depth: each pixel's ray marks voxels traversed before the depth hit
+as pass-pending and the voxel at the hit as hit-pending. Default workspace
+$5\,\text{m}\times 5\,\text{m}\times 3\,\text{m}$ at $5\,\text{cm}$ voxel
+size.
 
 \paragraph{Object dynamics property.}
-\file{pose\_update/object\_dynamics.py} hosts a per-label table
-mapping each detection label to $(e,\,\mu,\,\text{shape},\,r_{\text{obj}})$.
-Restitution defaults from agricultural / engineering literature: apple
-$e=0.30$, milkbox $0.40$, cola $0.50$, cup $0.40$, pot $0.40$,
-flowerpot $0.30$. Unknown labels fall back to $e=0.40,\,r=0.05$
-(\texttt{DEFAULT\_DYNAMICS}). A perception-side override hook lets a
-learned estimator (e.g.\ Galileo) supersede the table per-detection.
+A per-label table maps each detection label to
+$(e,\,\mu,\,\text{shape},\,r_{\text{obj}})$. Restitution defaults from
+agricultural / engineering literature; a generic fallback with
+$e=0.40,\,r=0.05$ applies to unknown labels. A perception-side override
+hook lets a learned estimator supersede the table per-detection.
 
-\paragraph{Parametric dispersion model}
-(\file{pose\_update/gravity\_predict.py}\,$\to$\,\texttt{predict\_landing\_pose}).
+\paragraph{Parametric dispersion model.}
 For drop height $h$ (resolved via voxel-driven raycast, below):
 \begin{equation}\label{eq:gravity_sigma}
 \begin{aligned}
@@ -573,171 +532,983 @@ v_{\text{impact}} &= \sqrt{2 g h}, \qquad
 \end{aligned}
 \end{equation}
 Default $\varepsilon_{\text{rough}} = 5\!\cdot\!10^{-3}\,\text{m}\,/\,(\text{m s}^{-1})$;
-\texttt{shape\_footprint\_factor}: spherical $0.25$, cylindrical
-$0.50$, box $0.70$, irregular $1.00$. Higher restitution increases
-$\sigma_{\text{bounce}}$ — physically, a rubber ball bounces several
-times each accruing scatter, while a clay ball lands once and stays.
+footprint factor by shape: spherical $0.25$, cylindrical $0.50$, box $0.70$,
+irregular $1.00$. Higher restitution increases $\sigma_{\text{bounce}}$ ---
+physically, a rubber ball bounces several times each accruing scatter,
+while a clay ball lands once and stays.
 
 \paragraph{Voxel-driven $h$ branch.}
-The downward raycast (\texttt{VoxelObservability.raycast\_down})
-classifies the column into one of four states; each adjusts $h$,
-landing $z$, and the $\sigma_z$ floor:
+The downward raycast classifies the column into one of four states; each
+adjusts $h$, landing $z$, and the $\sigma_z$ floor:
 \begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
 \item \texttt{hit\_occupied}: clean surface at $h^\star$;
   $h = h^\star$, $\sigma_z$ from \eqref{eq:gravity_sigma}.
-\item \texttt{mixed\_unseen}: surface known but UNSEEN voxels above
-  it; $h = h^\star$, $\sigma_z$ extra-inflated by
-  $(h_u - h^\star)/2$ to reflect path uncertainty.
-\item \texttt{all\_unseen}: surface unknown;
-  $h = (h_u + h_{\text{floor}})/2$ (\emph{midpoint}, not worst case),
-  $\sigma_z = (h_u - h_{\text{floor}})/2$.
+\item \texttt{mixed\_unseen}: surface known but UNSEEN voxels above it;
+  $h = h^\star$, $\sigma_z$ extra-inflated by $(h_u - h^\star)/2$ to reflect
+  path uncertainty.
+\item \texttt{all\_unseen}: surface unknown; $h = (h_u + h_{\text{floor}})/2$
+  (\emph{midpoint}, not worst case), $\sigma_z = (h_u - h_{\text{floor}})/2$.
 \item \texttt{all\_empty}: column observed empty all the way to the
-  workspace floor; $h = h_{\text{floor}}$,
-  $\sigma_z = r_{\text{obj}}$.
+  workspace floor; $h = h_{\text{floor}}$, $\sigma_z = r_{\text{obj}}$.
 \end{itemize}
-The midpoint choice for \texttt{all\_unseen} gives the EKF a useful
-prior that subsequent observations can correct quickly, instead of
-pushing the mean to an extreme that's unlikely to be right.
+The midpoint choice for \texttt{all\_unseen} gives the EKF a useful prior
+that subsequent observations can correct quickly, instead of pushing the
+mean to an extreme that is unlikely to be right.
 
 \paragraph{Trigger.}
-Three production sites all detect the FSM exiting
-$\{\textsc{Holding},\textsc{Releasing}\}$ and call into
-\eqref{eq:gravity_sigma}:
-\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
-\item \file{pose\_update/orchestrator.py}\,$\to$\,\texttt{\_maybe\_gravity\_predict} (RBPF backend) — replaces every particle's $(T_{wo}, P_{wo})$ via \texttt{RBPFState.overwrite\_object\_pose}.
-\item \file{pose\_update/orchestrator\_gaussian.py}\,$\to$\,\texttt{\_maybe\_gravity\_predict} (Gaussian backend) — calls \texttt{GaussianState.overwrite\_object\_pose} (see §II.5 world-frame overwrite). Wired in \texttt{TwoTierOrchestratorGaussian.step} immediately after the fast tier.
-\item \file{tests/visualize\_ekf\_tracking.py} (instrumented tracker harness) — mutates \texttt{state.objects[oid].\{mu\_bo, cov\_bo\}} inline.
-\end{itemize}
-Subsequent frames see the released track in
-\texttt{unobserved\_oids}, so \eqref{eq:proc}'s keyframe freeze
-preserves the gravity prior (in particular $\sigma_{yaw}=\pi$ does
-\emph{not} pump $\sigma_{xy}$ via cross-coupling).
-
-\paragraph{Toggle.}
-\texttt{BernoulliConfig.gravity\_predict} (default \texttt{True})
-gates the RBPF hook;
-\texttt{TwoTierOrchestratorGaussian.gravity\_predict\_enabled}
-(constructor flag, default \texttt{True}) gates the Gaussian hook.
-\texttt{BernoulliConfig.workspace\_floor\_z} /
-\texttt{TwoTierOrchestratorGaussian.workspace\_floor\_z} (default
-$-1.0$\,m) sets the column terminator. With \texttt{voxel\_obs}
-unset, both hooks short-circuit and the legacy static-Q-only release
-behaviour is preserved exactly.
+The release predict fires once at $\{\textsc{Holding},\textsc{Releasing}\}\to
+\textsc{Idle}$. A toggle flag (default on) gates the hook; with the voxel
+grid unset, the hook short-circuits and the legacy static-$Q$-only release
+behaviour is preserved exactly. Subsequent frames see the released track
+as unobserved, so \eqref{eq:proc}'s keyframe freeze preserves the gravity
+prior (in particular $\sigma_{yaw}=\pi$ does not pump $\sigma_{xy}$ via
+cross-coupling).
 
 \subsection*{II.12 Gripper phase FSM}
 
-\file{pose\_update/gripper\_state.py}\,$\to$\,\texttt{GripperPhaseTracker}.
 Four phases:
 $\textsc{Idle}\to\textsc{Grasping}\to\textsc{Holding}\to\textsc{Releasing}\to\textsc{Idle}$.
-\textbf{Project assumption:} the gripper begins fully open; ANY closing
-of the fingers registers as a grasp action. The state machine therefore
-detects ``closed'' as a drop $\ge $ \texttt{close\_delta\_m}=$0.005$~m
-below the rolling open baseline (5\,mm captures any non-trivial finger
-motion while ignoring proprioception jitter), in addition to the
-absolute thresholds. Driven by:
-\begin{itemize}
-\item Width threshold crossings with hysteresis
-  (\texttt{closed\_width\_m}=$0.025$~m, \texttt{open\_width\_m}=$0.040$~m,
-  \texttt{close\_delta\_m}=$0.005$~m below baseline).
-\item Stability test (last \texttt{history\_size}=$5$ widths span
-  $<$ \texttt{motion\_threshold\_m}=$0.01$~m).
-\item Min-frames timer (\texttt{min\_transition\_frames}=$5$) holds the
-  transition phases through brief instability.
+\textbf{Project assumption:} the gripper begins fully open; ANY closing of
+the fingers registers as a grasp action. The state machine therefore detects
+``closed'' as a drop $\ge\!0.005$~m below the rolling open baseline (5~mm
+captures any non-trivial finger motion while ignoring proprioception
+jitter), in addition to the absolute thresholds. Drivers:
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Width threshold crossings with hysteresis (closed $0.025$~m, open
+  $0.040$~m, drop-below-baseline $0.005$~m).
+\item Stability test: last $5$ widths span $<\!0.01$~m.
+\item Min-frames timer ($5$ frames) holds the transition phases through
+  brief instability.
 \end{itemize}
-At the \textsc{Idle}$\to$\textsc{Grasping} edge, the held oid is
-selected by \texttt{GraspOwnerDetector}: rank detections by inside-
-gripper-volume containment fraction (= count\_inside / total\_pts);
-tiebreak by smallest mask area. Falls back to nearest-live-track
-within $0.30$~m of $T_{we}$. Self-merges propagate via
-\texttt{apply\_merges}: drop $=$ \texttt{held\_obj\_id} $\to$ switch
-to the keep.
+At the $\textsc{Idle}\to\textsc{Grasping}$ edge, the held oid is selected
+by ranking detections by inside-gripper-volume containment fraction
+($=$count\_inside/total\_pts); ties break by smallest mask area. A fallback
+returns the nearest live track within $0.30$~m of $T_{we}$. Self-merges
+propagate via an apply-merges hook: if the dropped id was the held seed,
+it switches to the keep id.
 
 \subsection*{II.13 Frame-by-frame algorithm}
 
 \begin{algorithm}[H]
-\caption{One frame of the Bernoulli-EKF tracker (driver loop).}
+\caption{One frame of the Bernoulli-EKF tracker.}
 \begin{algorithmic}[1]
 \State \emph{Inputs}: $T_{wb}$, $T_{bc}$, $T_{bg}$, $w$, RGB, depth, detections.
 \State $g \gets \textsc{GripperPhaseTracker}.\textsc{step}(w, \ldots)$
-\State $\textsc{relation\_pipeline}.\textsc{maybe\_update}(\ldots)$
+\State Maybe call relations backend (\S II.9 trigger).
 \State $\mathcal{H} \gets \textsc{Expand}(g.\text{held},\,\mathcal{E}_t)\cap\text{live oids}$
-\State $\mathcal{U} \gets \{o : \texttt{frames\_since\_obs}[o] > 0\}$ \Comment{keyframe-frozen set}
+\State $\mathcal{U} \gets \{o : \text{frames since obs}[o] > 0\}$ \Comment{keyframe-frozen set}
 \State \textsc{predict\_static}(skip\,$=\!\mathcal{H}$,\;unobserved\,$=\!\mathcal{U}$);\,\textsc{rigid\_attachment\_predict}(each $o\in\mathcal{H}$)
-\State \textsc{suppress\_subpart\_detections};\,\textsc{centroid\_cam\_from\_mask};\,gather \texttt{dets\_for\_assoc}
+\State \textsc{suppress\_subpart\_detections};\,\textsc{centroid\_cam\_from\_mask};\,gather detections
 \State \textsc{hungarian\_associate} $\to$ matches, unmatched\_tracks, unmatched\_dets
 \For{each match $(o, d)$}
   \If{$o = g.\text{held}$ and (held-prefilter or innov-clamp triggers)} skip update \EndIf
   \State \textsc{update\_observation\_centroid}; update $r_o$ via match log-likelihood
 \EndFor
 \For{each unmatched track $o$}
-  \State Update $r_o$ via miss equation; floor at \texttt{r\_held\_floor} if $o = g.\text{held}$
+  \State Update $r_o$ via miss equation; floor at $r_{\text{held floor}}$ if $o = g.\text{held}$
 \EndFor
 \For{each unmatched detection $d$}
-  \If{\textsc{birth\_admissible}$(d)$ and not \textsc{is\_near\_live\_track}$(d)$}
-    \State Mint new oid, run ICP once, set $r_0=0.4$
+  \If{birth-admissible$(d)$ and not near-live$(d)$}
+    \State Mint new oid, run ICP once, set $r_0$ per \eqref{eq:birth_r}
   \EndIf
 \EndFor
 \State Prune oids with $r_o < r_{\min}$ (skip held seed)
 \State $\mathcal{P} \gets \{(\min(p,c),\max(p,c))\,:\,(p,c,\cdot)\in\mathcal{E}_t\}$
-\State \textsc{\_self\_merge\_pass}$(\text{held}=g.\text{held},\,\text{protected}=\mathcal{P})$
-\State $g$.\textsc{apply\_merges}(merges); \textsc{relation\_pipeline}.\textsc{remap\_after\_merges}(merges)
-\State \textsc{\_maybe\_gravity\_predict}$(g)$ \Comment{release transition: overwrite the just-released oid via \eqref{eq:gravity_sigma}}
+\State Self-merge pass with held$=g.\text{held}$ and protected$=\mathcal{P}$
+\State $g$.apply-merges(merges); relation pipeline.remap-after-merges(merges)
+\State Maybe gravity-predict (release transition: overwrite the just-released oid via \eqref{eq:gravity_sigma})
 \end{algorithmic}
 \end{algorithm}
 
 \subsection*{II.14 Numerical defaults summary}
 
 \begin{tabular}{@{}lll@{}}
-$R_{cam}$ & $\mathrm{diag}((0.02\,m)^2)$ & centroid measurement \\
-$Q_{\text{static}}$ & $1{\rm e}{-6}\to1{\rm e}{-5}\to1{\rm e}{-8}$ & schedule on \texttt{frames\_since\_obs} \\
-$Q_{\text{manip seed}}$ (graspg./relsg.) & $\mathrm{diag}((0.02)^2{\times}3,(0.10)^2{\times}3)$ & per frame \\
-$Q_{\text{manip seed}}$ (holdg.) & $\mathrm{diag}(2.5{\rm e}{-4}{\times}3,1{\rm e}{-3}{\times}3)$ & per frame \\
-$Q_{\text{manip transit}}$ & holding row above & apples-on-tray \\
+$R_{cam}$ & $\mathrm{diag}((0.02\,\mathrm{m})^2)$ & centroid measurement \\
+$Q_{\text{static}}$ & $1{\rm e}{-}6\to1{\rm e}{-}5\to1{\rm e}{-}8$ & schedule on frames since obs \\
+$Q_{\text{manip seed}}$ (grasping/releasing) & $\mathrm{diag}((0.02)^2{\times}3,(0.10)^2{\times}3)$ & per frame \\
+$Q_{\text{manip seed}}$ (holding) & $\mathrm{diag}(2.5{\rm e}{-}4{\times}3,1{\rm e}{-}3{\times}3)$ & per frame \\
+$Q_{\text{manip transit}}$ & holding row above & transitive held members \\
 $G_{\text{out},t}$ & $21.108$ & $\chi^2_3$ at $99.97\%$ \\
 $G_{\text{in},t}$ & $7.815$ & $\chi^2_3$ at $95\%$ Huber inner \\
 $\alpha_{\text{SAM2}}$ & $4.4$ & continuity bonus \\
-\texttt{max\_residual\_m} & $0.30$~m & hard Euclidean residual cap (None disables) \\
-\texttt{P\_max} & \texttt{None} & covariance saturation cap (no cap default) \\
-\texttt{P\_min\_diag} & \texttt{None} & per-axis $P$ floor (None = no floor) \\
-\texttt{birth\_min\_dist\_m} & $0.05$ & default near-live radius \\
-\texttt{birth\_border\_margin\_px} & $2$ & image-edge margin \\
-\texttt{birth\_pending\_ttl\_frames} & $30$ & pending-birth TTL ($\sim$1\,s @ 30\,Hz) \\
-\texttt{held\_birth\_radius\_m} & $0.25$ & wider for held oid \\
-\texttt{held\_meas\_radius\_m} & $0.25$ & $T_{we}$ prefilter (driver-side) \\
-\texttt{held\_meas\_innov\_max\_m} & $0.20$ & innov clamp (driver-side) \\
-\texttt{r\_min} & $10^{-3}$ & prune threshold \\
-\texttt{r\_held\_floor} & $0.50$ & held existence floor \\
-\texttt{birth\_confirm\_k} & $3$ & tracker-side unmatched-streak count \\
-\texttt{birth\_score\_min} & $0.20$ & rolling-max score floor \\
-\texttt{self\_merge\_trans\_m} & $0.05$ & Euclidean merge gate \\
-\texttt{dedup\_voxel\_size\_m} & $0.02$ & subpart suppression voxel size \\
-\texttt{dedup\_containment\_thresh} & $0.8$ & subpart suppression threshold \\
-\texttt{hungarian\_label\_penalty} ($\beta$) & $0.0$ default & soft mode; visualizer sets $6.0$ \\
-\texttt{hungarian\_score\_weight} ($\gamma$) & $0.0$ default & soft mode; visualizer sets $2.0$ \\
-\texttt{closed\_width\_m}, \texttt{open\_width\_m} & $0.025,\,0.040$ & FSM hysteresis \\
-\texttt{close\_delta\_m} & $0.005$ & drop-below-baseline = grasp \\
-\texttt{grasp\_radius\_m} & $0.30$ & nearest-track gate at grasp onset \\
+$\max\_$residual & $0.30$~m & hard Euclidean residual cap (None disables) \\
+$P_{\max}$ & none & covariance saturation cap (no cap default) \\
+birth-min-dist & $0.05$~m & default near-live radius \\
+birth-border-margin & $2$~px & image-edge margin \\
+birth-pending-TTL & $30$ frames & pending-birth TTL ($\sim\!1$~s @ 30~Hz) \\
+held-birth-radius & $0.25$~m & wider for the held oid \\
+held-meas-radius & $0.25$~m & end-effector prefilter \\
+held-meas-innov-max & $0.20$~m & innovation clamp \\
+$r_{\min}$ & $10^{-3}$ & prune threshold \\
+$r_{\text{held floor}}$ & $0.50$ & held existence floor \\
+birth-confirm-$k$ & $3$ & tracker-side unmatched-streak count \\
+birth-score-min & $0.20$ & rolling-max score floor \\
+self-merge-trans & $0.05$~m & Euclidean merge gate \\
+dedup-voxel-size & $0.02$~m & subpart suppression voxel size \\
+dedup-containment-thresh & $0.8$ & subpart suppression threshold \\
+$\beta$ (label penalty) & $0.0$ default & soft mode; production sets $6.0$ \\
+$\gamma$ (score weight) & $0.0$ default & soft mode; production sets $2.0$ \\
+closed/open width & $0.025\,\mathrm{m},\,0.040\,\mathrm{m}$ & FSM hysteresis \\
+close-delta & $0.005$~m & drop-below-baseline = grasp \\
+grasp-radius & $0.30$~m & nearest-track gate at grasp onset \\
 EMA $\alpha$, threshold & $0.3,\,0.5$ & relation smoothing \\
-\texttt{relation\_every\_n\_frames} & $90$ & periodic LLM tick \\
-\texttt{gravity\_predict} & \texttt{True} & gate one-shot release-time gravity hook \\
-\texttt{workspace\_floor\_z} & $-1.0$\,m & column terminator for raycast\_down \\
-$\varepsilon_{\text{rough}}$ & $5\!\cdot\!10^{-3}$ & bounce-roughness coefficient (m\,/\,m\,s$^{-1}$) \\
-voxel grid (default) & $5\,\text{cm}$ at $5{\times}5{\times}3$\,m & \file{voxel\_observability.py} \\
-\texttt{n\_min\_hit}, \texttt{n\_min\_pass} & $2,\,3$ & voxel hysteresis thresholds \\
+relation-every-$n$-frames & $90$ & periodic backend tick \\
+gravity-predict & on & one-shot release-time gravity hook \\
+workspace-floor-$z$ & $-1.0$~m & column terminator for raycast-down \\
+$\varepsilon_{\text{rough}}$ & $5\!\cdot\!10^{-3}$ & bounce-roughness coefficient \\
+voxel grid (default) & $5$~cm at $5{\times}5{\times}3$~m & observability grid \\
+$n_{\min}^{\text{hit}},\,n_{\min}^{\text{pass}}$ & $2,\,3$ & voxel hysteresis thresholds \\
 \end{tabular}
 
-\subsection*{II.15 Implementation index}
-\begin{itemize}
-\item State / predict: \file{pose\_update/gaussian\_state.py}, \file{pose\_update/object\_belief.py}, \file{pose\_update/ekf\_se3.py}
-\item Detection conditioning: \file{pose\_update/det\_dedup.py}, \file{pose\_update/icp\_pose.py}
-\item Association / update: \file{pose\_update/association.py}, \file{pose\_update/orchestrator.py}, \file{gaussian\_state.py::update\_observation\_centroid}
-\item Birth / prune: \file{pose\_update/orchestrator.py::birth\_admissible}, \file{pose\_update/birth\_gating.py}
-\item Self-merge: \file{pose\_update/orchestrator.py::\_self\_merge\_pass}
-\item Relations: \file{pose\_update/relation\_orchestrator.py}, \file{pose\_update/relation\_client.py}, \file{pose\_update/relation\_utils.py}
-\item Gripper FSM: \file{pose\_update/gripper\_state.py}, \file{pose\_update/grasp\_owner\_detector.py}
-\item Visibility: \file{pose\_update/visibility.py}
-\item Gravity-aware release predict: \file{pose\_update/voxel\_observability.py}, \file{pose\_update/object\_dynamics.py}, \file{pose\_update/gravity\_predict.py}
-\item Driver / harness: \file{tests/visualize\_ekf\_tracking.py}
+\bigskip\hrule\bigskip
+
+%=============================================================================
+\section*{Part III --- Algorithm-to-Code Map}
+\label{sec:map}
+
+\sloppy
+
+Each line below cites exactly one source-file path. Where one file hosts
+multiple algorithmic items, the path repeats across multiple lines, each
+line scoping a distinct role.
+
+\subsection*{Public API and configuration}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Public five-method surface (\texttt{detect}, \texttt{step}, \texttt{get\_scene}, \texttt{get\_points}, \texttt{smooth}): \file{ekf\_tracker/api.py}.
+\item Bernoulli/EKF/birth thresholds and gates (\S II.4, II.6 numerics): \file{ekf\_tracker/config.py}.
+\item Live OWL+SAM2 streaming detection pipeline behind \texttt{detect}: \file{ekf\_tracker/perception\_pipeline.py}.
 \end{itemize}
+
+\subsection*{State}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Per-object Bernoulli-Gaussian belief and storage: \file{ekf\_tracker/state/gaussian\_state.py}.
+\item Existence-probability arithmetic (\eqref{eq:bern_pred_r}, \eqref{eq:r_assoc}, \eqref{eq:r_miss}, \eqref{eq:birth_r}): \file{ekf\_tracker/state/bernoulli.py}.
+\item SE(3) tangent algebra, Joseph form, Huber reweight, $Q$ schedule: \file{utils/ekf\_se3.py}.
+\item Lift-to-base and information-sum primitives used by ICP and self-merge: \file{utils/object\_belief.py}.
+\item Append-only per-track ICP-measurement chain (diagnostic, smoother substrate): \file{ekf\_tracker/state/obs\_chain.py}.
+\item RBPF backend state (legacy fast tier; not the canonical path): \file{ekf\_tracker/state/rbpf\_state.py}.
+\end{itemize}
+
+\subsection*{Predict}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item World-static and rigid-attachment per-track predict (\eqref{eq:proc}, \eqref{eq:telescope}): \file{ekf\_tracker/state/gaussian\_state.py}.
+\item Phase-aware $Q$ schedule and adjoint covariance transport: \file{utils/ekf\_se3.py}.
+\item Step orchestration and held-set wiring: \file{ekf\_tracker/gaussian\_ekf\_tracker.py}.
+\item Two-tier orchestrator gluing fast tier and slow tier: \file{ekf\_tracker/orchestrator\_gaussian.py}.
+\end{itemize}
+
+\subsection*{Detection conditioning}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Voxel-containment subpart suppression and label-histogram merge: \file{perception/det\_dedup.py}.
+\item Mask cleaning, depth back-projection, centroid validity gate: \file{perception/icp\_pose.py}.
+\end{itemize}
+
+\subsection*{Association}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Hungarian solver, $\chi^2_3$ gate, residual cap, label penalty (\eqref{eq:cost_sam2}, \eqref{eq:hung}): \file{perception/association.py}.
+\item Default values for $\alpha_{\text{SAM2}}$, $G_{\text{out}}$, $\beta$, $\gamma$ and the label-enforcement flag: \file{ekf\_tracker/config.py}.
+\end{itemize}
+
+\subsection*{Update}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Translation-only Joseph step on the centroid measurement (\S II.5): \file{ekf\_tracker/state/gaussian\_state.py}.
+\item Full-$\SE$ Joseph form and IEKF inner iterations (used when ICP succeeds): \file{utils/object\_belief.py}.
+\item EKF predict, EKF update on $\SE$, Huber reweight (\eqref{eq:huber_w}): \file{utils/ekf\_se3.py}.
+\item World-frame composition $\mu_{wo},\Sigma_{wo}$ (\eqref{eq:world_compose}): \file{ekf\_tracker/state/gaussian\_state.py}.
+\item World-frame pose-and-cov overwrite (release-hook primitive): \file{ekf\_tracker/state/gaussian\_state.py}.
+\end{itemize}
+
+\subsection*{Birth and prune}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Confirm-$k$ / score / border / TTL admission gate: \file{ekf\_tracker/birth\_gate.py}.
+\item Near-live-track world-frame proximity gate: \file{perception/birth\_gating.py}.
+\item Birth existence probability $r_0$ (\eqref{eq:birth_r}): \file{ekf\_tracker/state/bernoulli.py}.
+\item One-shot ICP at admission (with mask cleaning and depth filter): \file{perception/icp\_pose.py}.
+\end{itemize}
+
+\subsection*{Self-merge}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Self-merge pass (candidate enumeration, sort, fuse) and merge-event emission: \file{ekf\_tracker/gaussian\_ekf\_tracker.py}.
+\item Information-sum fusion primitive (\eqref{eq:self_merge_info}): \file{ekf\_tracker/state/gaussian\_state.py}.
+\end{itemize}
+
+\subsection*{Visibility}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Fibonacci-sphere sampling and depth-test visibility $p_v$ (\eqref{eq:pv}): \file{perception/visibility.py}.
+\end{itemize}
+
+\subsection*{Relations}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Trigger gate, backend dispatch, edge emission, drop-to-keep remap: \file{ekf\_tracker/relations/relation\_orchestrator.py}.
+\item LLM and REST clients with disk-cached prompts/responses: \file{ekf\_tracker/relations/relation\_client.py}.
+\item Per-edge EMA smoother (\S II.9): \file{ekf\_tracker/relations/relation\_filter.py}.
+\item Held-set closure under in/on edges (\S II.10) and trigger predicate: \file{ekf\_tracker/relations/relation\_utils.py}.
+\end{itemize}
+
+\subsection*{Gripper FSM}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Four-phase FSM with hysteresis, stability, and min-frame timer: \file{utils/gripper\_state.py}.
+\item Held-oid selection at the grasp edge (containment-fraction ranking): \file{ekf\_tracker/manipulation/grasp\_owner\_detector.py}.
+\item Phase + held-set wiring into the tracker step: \file{ekf\_tracker/manipulation/gripper\_state\_inferrer.py}.
+\item Gripper finger geometry primitives shared by FSM and visualizer: \file{utils/gripper\_geometry.py}.
+\end{itemize}
+
+\subsection*{Gravity-aware release}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Voxel observability grid and downward raycast classification: \file{perception/voxel\_observability.py}.
+\item Per-label dynamics table $(e,\mu,\text{shape},r_{\text{obj}})$ with default fallback: \file{utils/object\_dynamics.py}.
+\item Parametric dispersion model (\eqref{eq:gravity_sigma}) and landing-pose synthesis: \file{ekf\_tracker/manipulation/gravity\_predict.py}.
+\item One-shot release-transition hook calling the overwrite primitive: \file{ekf\_tracker/api.py}.
+\end{itemize}
+
+\subsection*{Driver, harness, slow tier}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Canonical instrumented fast-tier driver with debug capture: \file{scripts/visualize\_ekf\_tracking.py}.
+\item Fast-tier orchestration (per-frame step body, debug output): \file{ekf\_tracker/gaussian\_ekf\_tracker.py}.
+\item Slow tier (factor-graph smoother) and its trigger schedule: \file{ekf\_tracker/factor\_graph.py}.
+\item SLAM marginal interface and base-pose adapters: \file{utils/slam\_interface.py}.
+\item Robot kinematics and end-effector geometry (Fetch baseline): \file{utils/robot\_models/fetch.py}.
+\item Deep camera-pose refiner used only when explicitly enabled: \file{perception/camera\_pose\_refiner.py}.
+\item Adaptive measurement-noise kernel for centroid likelihood: \file{perception/adaptive\_kernel.py}.
+\end{itemize}
+
+\subsection*{Tests and diagnostics}
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item Sole quantitative regression (parity against cached detections): \file{tests/parity\_apple\_drop.py}.
+\item Live OWL+SAM2 detect $\to$ EKF step smoke test: \file{tests/integration/test\_detect\_step\_pipeline.py}.
+\item Per-API mp4 renderer (5 separate videos, one per public method): \file{tests/diagnostics/render\_api\_videos.py}.
+\item API demo with overlay panels (single-trajectory): \file{tests/demo\_apis.py}.
+\end{itemize}
+
+\fussy
+
+\bigskip\hrule\bigskip
+
+%=============================================================================
+\section*{Part IV --- Reviewer Critique}
+\label{sec:critique}
+
+The audit underlying this part is summarised by category. Citations use
+\texttt{file.py:line} for evidence. The critique is intended for a top-tier
+robotics venue review and is intentionally blunt.
+
+\subsection*{IV.A Single-trajectory hardcoding}
+
+The runnable pipeline carries trajectory-specific anchors in its production
+sources, not just in scripts:
+
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item \texttt{ekf\_tracker/manipulation/gravity\_predict.py:46-47} sets the
+  bounce-roughness coefficient $\varepsilon_{\text{rough}}=5\!\cdot\!10^{-3}$
+  with the inline comment ``tune empirically on the apple\_drop trajectory''.
+\item \texttt{ekf\_tracker/gaussian\_ekf\_tracker.py:82} justifies a held-set
+  rule with a specific frame range of \texttt{apple\_drop fr 269-273}.
+\item \texttt{ekf\_tracker/gaussian\_ekf\_tracker.py:924} cites a specific
+  \texttt{apple\_in\_the\_tray} frame as the failure case the fix is keyed to.
+\item \texttt{ekf\_tracker/state/gaussian\_state.py:612} bounds drift by
+  citing ``apple\_in\_the\_tray oid 3, frames 290-330''.
+\item \texttt{perception/icp\_pose.py:272} defends a heuristic with the
+  apple\_in\_the\_tray frame-430 case.
+\item \texttt{utils/fetch\_kinematics.py:17} calibrates camera-to-base
+  rotation against \texttt{/tf} from the \texttt{apple\_in\_the\_tray} bag.
+\item \texttt{utils/robot\_models/fetch.py:24, 53} pin empirical inside-pts
+  validation to \texttt{apple\_in\_the\_tray frame 488}.
+\end{itemize}
+
+Comments-in-code that name a specific frame index of a specific bag are not
+documentation; they are evidence that the algorithm was reverse-engineered
+from one episode and was never re-validated on another. A new trajectory
+that does not tickle these specific frame indices is not exercised by any
+gate; behaviour on unobserved scene structure is undefined.
+
+The vocabulary leaks reinforce this. The detection-pipeline tests and
+demos all pass a fixed list shaped like
+\texttt{["apple", "cup", "bottle", "cabinet", "bowl"]}
+(\texttt{tests/demo\_apis.py:218}, \texttt{tests/diagnostics/render\_api\_videos.py:441-442},
+\texttt{tests/integration/test\_detect\_step\_pipeline.py:106}). The
+per-label dynamics table covers six labels (apple, milkbox, cola, cup, pot,
+flowerpot) at \texttt{utils/object\_dynamics.py:69-76}; everything else is
+silently mapped to a 5~cm spherical rigid body with $e{=}0.40,\,\mu{=}0.50$
+through \texttt{utils/object\_dynamics.py:104-105}, with no warning emitted
+when the fallback is taken.
+
+Single-frame regression artefacts are also pervasive: \texttt{FRAME\_IDX
+= 399} hardcoded for apple\_in\_the\_tray (\texttt{tests/diagnostics/dump\_llm\_relation\_io.py:34},
+\texttt{tests/diagnostics/visualize\_llm\_relation\_frame.py:29}),
+an entire test file pinned to that frame
+(\texttt{tests/integration/test\_llm\_relation\_frame399.py}), and
+\texttt{demo\_frame=281} hardcoded as the apple\_drop release boundary
+(\texttt{tests/demo\_apis.py:208}). The sole quantitative regression in
+the suite is \texttt{tests/parity\_apple\_drop.py}, a parity check against
+cached detections on a single bag; it cannot fail unless cache and code
+disagree, so it provides no signal about correctness on any other input.
+
+\subsection*{IV.B Robot-platform and capture-rate hardcoding}
+
+The pipeline silently assumes a Fetch parallel-jaw gripper running at
+30~Hz. URDF finger-link offsets are hard-encoded into
+\texttt{utils/robot\_models/fetch.py:11-14} from the public Fetch hardware
+spec and then validated against a single bag-and-frame
+(\texttt{utils/robot\_models/fetch.py:24, 53}). Width hysteresis values
+in \texttt{utils/gripper\_state.py} (closed-width $25$~mm, open-width
+$40$~mm, drop-below-baseline $5$~mm) are tuned for fruit-sized objects in
+that gripper. Time constants -- birth-pending TTL of $30$ frames at
+\texttt{ekf\_tracker/config.py:99}, FSM min-transition $5$ frames in
+\texttt{utils/gripper\_state.py}, relation period $90$ frames in
+\texttt{ekf\_tracker/relations/relation\_utils.py} -- are interpretable
+only at $30$~Hz. None of these constants is exposed per-platform; deploying
+on another robot or rate requires editing source.
+
+\subsection*{IV.C Algorithmic narrowness}
+
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item \textbf{Two predict regimes are too few.} World-static and
+  rigid-attached miss sliding, rolling, in-flight, and any deformable
+  regime. The gravity-aware branch is a one-shot replacement at the
+  release transition (\texttt{ekf\_tracker/api.py:443}), not a process
+  model. An object that rolls off a tray edge mid-trajectory falls back
+  to static prediction with no further inflation.
+\item \textbf{Translation-only Joseph + birth-time ICP} permanently
+  forecloses post-birth rotation refinement
+  (\texttt{ekf\_tracker/state/gaussian\_state.py:546-670}).
+  Symmetric objects (cup, bowl) are unobservable in yaw forever; an object
+  re-encountered at a novel pose accumulates uncertainty unboundedly with
+  no mechanism for re-alignment.
+\item \textbf{The keyframe freeze is correct only under stationary
+  $T_{wb}$.} Loop-closure SLAM corrections retroactively shift past base
+  poses; the frozen $\Sigma_{bo,k_f}$ is then no longer the marginal
+  posterior. The diagnostic chain at
+  \texttt{ekf\_tracker/state/obs\_chain.py} is the natural substrate for
+  retroactive correction but is never read by the fast tier.
+\item \textbf{Hard vs.\ soft label gate is two algorithms shipped under
+  one name.} The default at \texttt{ekf\_tracker/config.py:59} is
+  \texttt{enforce\_label\_match=True} (hard gate); the production driver
+  at \texttt{scripts/visualize\_ekf\_tracking.py:2045-2068} overrides to
+  soft mode with $\beta{=}6.0$, $\gamma{=}2.0$, and
+  \texttt{enforce\_label\_match=False}. The paper-baseline gate breaks the
+  moment the open-vocabulary detector flips ``apple''~$\leftrightarrow$~``tomato''
+  on the same physical object across frames; the production gate is what
+  is empirically validated. The two names should not be the same algorithm.
+\item \textbf{Subpart suppression at $0.8$ voxel containment}
+  (\texttt{perception/det\_dedup.py:127}) absorbs an item-shaped mask into
+  a container-shaped mask whenever the item sits inside the container's
+  silhouette --- exactly the configuration the system claims to track via
+  in/on relations.
+\item \textbf{Self-merge gate fixed at 5~cm Euclidean}
+  (\texttt{ekf\_tracker/config.py:77}) has no scale-relative variant. A
+  $1$~m cabinet collapses to a single track if SAM2 yields two masks; two
+  adjacent items 5~cm apart in clutter survive arbitrarily.
+\item \textbf{Held-set closure capped at 8 iterations}
+  (\texttt{ekf\_tracker/relations/relation\_utils.py:30}). Containment
+  chains longer than 8 (item~$\to$~bowl~$\to$~tray~$\to$~cart~$\to$~shelf~$\to\ldots$)
+  are silently truncated.
+\item \textbf{Visibility = Fibonacci sphere of $r_{\text{obj}}$}
+  (\texttt{perception/visibility.py:59-87}) is wrong for flat (tray),
+  elongated (broom), and non-convex objects. A flat tray seen edge-on
+  registers near-zero $p_v$ even when fully visible from above; the
+  geometric occlusion does not match the logical observability the model
+  is supposed to capture.
+\item \textbf{Object dynamics covers six labels} at
+  \texttt{utils/object\_dynamics.py:69-76}; everything else is silently a
+  $5$~cm spherical rigid body with $e{=}0.40,\,\mu{=}0.50$. Glass, foam,
+  soft, articulated, and large objects all inherit this default with no
+  warning.
+\item \textbf{Workspace AABB fixed at $5\times 5\times 3$~m at 5~cm voxel
+  size} (\texttt{perception/voxel\_observability.py}). Tabletop scenes
+  waste 90\% of the grid; outdoor scenes truncate. Non-axis-aligned
+  surfaces produce systematic biases in the raycast-down classification.
+\item \textbf{Process-noise schedule and predict-static skip-cov is hidden
+  cross-file coupling.} The non-monotonic $Q$ table at
+  \texttt{utils/ekf\_se3.py:347-402} (idle $1{\rm e}{-}6\to$ unstable
+  $1{\rm e}{-}5\to$ stable $1{\rm e}{-}8$) is only safe because
+  \texttt{ekf\_tracker/state/gaussian\_state.py:267} skips covariance
+  updates for the unobserved set. Either piece in isolation is wrong;
+  refactoring either side breaks long-occlusion behaviour with no test
+  signal.
+\end{itemize}
+
+\subsection*{IV.D Bayesian incoherences}
+
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item \texttt{ekf\_tracker/config.py:104} sets $r_{\text{held floor}}=0.5$
+  while \texttt{ekf\_tracker/config.py:52} sets $r_{\min}=10^{-3}$. A held
+  track survives arbitrary missed observations regardless of evidence;
+  this is not a posterior under the miss-likelihood model
+  (\eqref{eq:r_miss}), it is a hold-out. The reported existence
+  probability for the held seed therefore loses its frequentist meaning.
+\item The translation-only update zeros the rotation cross-covariance
+  rather than marginalising it
+  (\texttt{ekf\_tracker/state/gaussian\_state.py:546-670}). Translation
+  observations carry rotation information through the lever arm
+  ($\Ad(T)$ has off-diagonal $[t]_\times R$ blocks); that information is
+  discarded by construction. The honest rule is to set $R_{rot}=\infty$
+  and run the full Joseph form on the joint covariance, which would
+  yield the same translation block but a properly marginalised rotation
+  block. The current shortcut is a documentation hazard.
+\item Subpart suppression merges label histograms but discards the
+  absorbed track's existence posterior
+  (\texttt{perception/det\_dedup.py:107-170}). A high-$r$ small object
+  contained inside a low-$r$ container loses its existence weight on
+  absorption.
+\item The EKF likelihood used for $r_{\text{assoc}}$ at
+  \eqref{eq:r_assoc} treats the $\chi^2$ rejection as a maximum-likelihood
+  decision and ignores the gating prior on assignment. The Hungarian
+  decision is therefore not coherent with the existence update under any
+  joint posterior on $(\sigma,r)$.
+\end{itemize}
+
+\subsection*{IV.E Evaluation vacuum}
+
+The only quantitative test in the suite is
+\texttt{tests/parity\_apple\_drop.py} --- a parity match against cached
+detections on a single bag. There is no held-out scene, no pose-error
+ground-truth metric, no frame-rate stress test, no clutter scaling, no
+multi-robot test, no comparison against any baseline tracker. The phrase
+``verified to machine precision on apple\_drop oid=1, fso=224'' that
+appears in earlier documentation is a numerical sanity check on the
+algebraic identity \eqref{eq:telescope}, not a validation of the algorithm
+against external truth.
+
+This documentation itself shows code/doc drift: prior to this rewrite, the
+LaTeX source referenced a \texttt{pose\_update/} directory that has been
+refactored out of the repository entirely. A system whose written
+description does not match its source tree is, by construction, not
+audited end-to-end.
+
+\subsection*{IV.F Top-3 worst single-scenario assumptions}
+
+\begin{enumerate}[leftmargin=1.5em,itemsep=2pt,topsep=2pt]
+\item $r_{\text{held floor}}=0.5$ (\texttt{ekf\_tracker/config.py:104}).
+  Held tracks are pinned alive regardless of evidence. This silently keeps
+  phantom held-object identities alive across long occlusions and turns
+  the existence probability into a meaningless number for the held seed.
+\item \texttt{LABEL\_DYNAMICS\_TABLE} covers six fruit-and-container
+  labels (\texttt{utils/object\_dynamics.py:69-76}). Every other label is
+  silently mapped to a $5$~cm spherical rigid body with $e{=}0.40,\,
+  \mu{=}0.50$. The gravity-aware release predict therefore degrades to
+  a fixed-shape, fixed-restitution prior outside the validated label set
+  with no caller signal.
+\item Hidden coupling between the $Q$-schedule
+  (\texttt{utils/ekf\_se3.py:347-402}) and the predict-static unobserved
+  branch (\texttt{ekf\_tracker/state/gaussian\_state.py:267}). The
+  non-monotonic $Q$ table is only safe because the unobserved branch
+  skips the covariance update; refactoring either side in isolation
+  breaks long-occlusion tracking with no test signal --- and the only
+  test in the suite is parity on a cached bag, so the regression cannot
+  surface.
+\end{enumerate}
+
+\bigskip\hrule\bigskip
+
+%=============================================================================
+\section*{Part V --- Per-Component Justification Audit}
+\label{sec:audit}
+
+For each algorithmic component, exactly one of the following is given:
+(i) a published \textbf{Reference} that directly supports the design
+choice, (ii) an undeniable \textbf{Principled} reason
+(algebraic, information-theoretic, or Bayesian), or
+(iii) a \textcolor{red}{\textbf{REDUNDANT}} flag indicating the
+component is unjustified relative to its complexity, with a recommended
+replacement.
+
+\subsection*{V.1 State and storage}
+
+\paragraph{Per-object Bernoulli--Gaussian belief.}
+\REFERENCE{} Vo \& Vo, ``The Cardinality Balanced Multi-Target
+Multi-Bernoulli Filter and Its Implementations'' (IEEE TSP, 2009);
+Mahler, \emph{Advances in Statistical Multisource-Multitarget
+Information Fusion} (Artech House, 2014), Ch.~7--8.
+
+\paragraph{Body-frame storage with SLAM marginal decoupled.}
+\PRINCIPLED{} Storing $\mu_{bo},\Sigma_{bo}$ in the base frame leaves
+the recursion independent of $T_{wb}$; the world view
+$T_{wo}=T_{wb}\,\mu_{bo}$ is the deterministic composition. SLAM
+updates no longer touch the per-object recursion; per-object updates
+no longer touch the SLAM marginal. Standard lever-arm decoupling, see
+Barfoot, \emph{State Estimation for Robotics} (2017), \S 6--\S 8.
+
+\paragraph{Right-trivialised SE(3) tangent (translation-then-rotation).}
+\REFERENCE{} Sol\`a, Deray, Atchuthan, ``A micro Lie theory for state
+estimation in robotics'' (arXiv:1812.01537, 2018). The choice of
+right-trivialisation and ordering convention is standard for SE(3)
+Kalman filtering.
+
+\paragraph{Dual-backend abstraction (Gaussian + RBPF).}
+\REDUNDANT{} The repository ships both backends, but the RBPF tier is
+acknowledged buggy and the canonical instrumented driver
+(\texttt{scripts/visualize\_ekf\_tracking.py:329}) exercises only the
+Gaussian backend. The shared interface in
+\texttt{utils/base\_pose\_backend.py} therefore duplicates every
+primitive (\texttt{update\_observation},
+\texttt{update\_observation\_centroid}, \texttt{predict\_static},
+\texttt{predict\_static\_all}) into \texttt{rbpf\_state.py} that no
+production path consumes.
+\textbf{Fix:} delete \texttt{ekf\_tracker/state/rbpf\_state.py} and
+\texttt{utils/base\_pose\_backend.py}; collapse the API surface to the
+Gaussian backend.
+
+\paragraph{\texttt{predict\_static\_all} alongside \texttt{predict\_static}.}
+\REDUNDANT{} \texttt{predict\_static\_all} is a one-line wrapper that
+forwards its arguments unchanged to \texttt{predict\_static}
+(\texttt{ekf\_tracker/state/gaussian\_state.py:703-720}). It exists
+only to satisfy the dual-backend interface above.
+\textbf{Fix:} delete with the dual-backend abstraction.
+
+\subsection*{V.2 Predict}
+
+\paragraph{World-static motion ($\mu_{bo,k}=u_k\mu_{bo,k-1}$).}
+\PRINCIPLED{} Direct algebraic consequence of
+$T_{wb,k}\mu_{bo,k}=T_{wb,k-1}\mu_{bo,k-1}$. Identity arithmetic; no
+external reference needed.
+
+\paragraph{Rigid-attached motion ($\mu_{bo,k}=\delta_{bg,k}\mu_{bo,k-1}$).}
+\PRINCIPLED{} Direct algebraic consequence of the rigid-attachment
+assumption (object pose constant in gripper frame).
+
+\paragraph{Adjoint covariance transport.}
+\REFERENCE{} Bourmaud, M\'egret, Arnaudon, Giremus, ``Continuous-Discrete
+Extended Kalman Filter on Matrix Lie Groups Using Concentrated
+Gaussian Distributions'' (J.~Math.~Imag.~Vis., 2014); Forster, Carlone,
+Dellaert, Scaramuzza, ``On-Manifold Preintegration for Real-Time
+Visual-Inertial Odometry'' (IEEE T-RO, 2017).
+
+\paragraph{Keyframe-freeze branch (skip cov update for unobserved tracks).}
+\REDUNDANT{} The cross-coupling pumping that this freeze patches
+($[t(u_k)]_\times P_{rr}[t(u_k)]_\times^\top$ in the Ad-conjugate) is
+itself an artefact of an over-large process noise on rotation. The
+freeze is non-Bayesian: under it, the recursion's posterior at frame
+$k$ is no longer the marginal of any joint posterior, and any
+retroactive SLAM correction (loop closure) is silently inconsistent
+with the frozen $\Sigma_{bo,k_f}$.
+\textbf{Fix:} set $Q_{\text{static}}=0$ for genuinely static objects
+(no random walk, no scheduled inflation) and run the recursion
+uniformly. The cross-coupling is then driven only by genuine motion.
+
+\paragraph{$Q$ schedule on \texttt{frames\_since\_obs} ($1{\rm e}{-}6\to1{\rm e}{-}5\to1{\rm e}{-}8$).}
+\REDUNDANT{} Adaptive $Q$ on observation age has no Bayesian
+justification. The non-monotonic ramp (small idle / larger ``unstable''
+/ smaller ``stable'') is tuned to mimic the keyframe-freeze behaviour
+approximately; it is a workaround for a workaround. Maybeck,
+\emph{Stochastic Models, Estimation, and Control} (1979), \S 1.5: $Q$
+should reflect physical motion uncertainty, not estimator state.
+\textbf{Fix:} one $Q$ per regime (static / manipulation), no schedule.
+
+\paragraph{Covariance saturation $\Phi$ (trace cap on $P$).}
+\REDUNDANT{} The default \texttt{P\_max=None}
+(\texttt{ekf\_tracker/config.py:55}) means the cap is dead code in
+production. Trace-clipping violates posterior optimality and
+consistency (Maybeck \S 1.5).
+\textbf{Fix:} delete \texttt{saturate\_covariance} and the
+\texttt{P\_max} kwarg. If covariance grows unboundedly, repair the
+predict / observation models, do not clip.
+
+\subsection*{V.3 Detection conditioning}
+
+\paragraph{Voxel-containment subpart suppression.}
+\PRINCIPLED{} 3D analogue of 2D non-maximum suppression. A small
+mask whose voxel set is mostly inside a larger mask's voxel set is,
+under rigid-body assumptions, almost certainly an over-segmentation of
+the larger mask. Compare 2D NMS in Neubeck \& Van Gool, ``Efficient
+Non-Maximum Suppression'' (ICPR, 2006).
+
+\paragraph{Centroid validity gate.}
+\PRINCIPLED{} A mask without valid-depth pixels carries zero 3D
+information; dropping it is the only honest behaviour.
+
+\subsection*{V.4 Association}
+
+\paragraph{Hungarian assignment.}
+\REFERENCE{} Munkres, ``Algorithms for the Assignment and
+Transportation Problems'' (J.~SIAM, 1957); Bar-Shalom \& Fortmann,
+\emph{Tracking and Data Association} (Academic Press, 1988), \S 5.
+
+\paragraph{$\chi^2_3$ probabilistic gate at $G_{\text{out},t}=21.108$.}
+\REFERENCE{} Bar-Shalom, Li, Kirubarajan, \emph{Estimation with
+Applications to Tracking and Navigation} (Wiley, 2001), \S 3.3.
+$\chi^2_n$ tail at $99.97\%$ is a standard MIPDA outer-gate.
+
+\paragraph{Translation-only Mahalanobis (assume $R_{rot}=\infty$).}
+\PRINCIPLED{} Equivalent to marginalising rotation out of the joint
+$\chi^2_6$. The translation-block residual under linear-Gaussian
+assumptions is exactly $\chi^2_3$.
+
+\paragraph{Hard Euclidean residual cap (\texttt{max\_residual\_m}=$0.30$).}
+\REDUNDANT{} This second gate is admitted in the source comment to
+catch the ``inflated-covariance pathology'' --- it patches a failure
+of the $\chi^2$ gate caused by the keyframe-freeze and $Q$-schedule
+machinery (V.2). Two gates with one principle is one too many.
+\textbf{Fix:} repair $\Sigma_{bo}$ first (V.2); then remove the cap and
+let the $\chi^2$ gate be the sole probabilistic admission criterion.
+
+\paragraph{SAM2 continuity bonus $\alpha=4.4$.}
+\REDUNDANT{} The mechanism (cost discount for matched perception ids)
+is plausible but the value $4.4$ has no principled derivation. The
+post-hoc ``$\chi^2_3$ at $78\%$'' interpretation is unmotivated.
+\textbf{Fix:} replace with a likelihood factor
+$\log p(\tau_o=\mathrm{pid}_d)$ derived from SAM2's empirical
+id-stability statistics, or remove and rely on the $\chi^2$ gate
+alone. Encoding identity continuity as a likelihood places it in the
+same probabilistic framework as the $\chi^2$ gate.
+
+\paragraph{Hard label gate (default \texttt{enforce\_label\_match=True}).}
+\REDUNDANT{} The hard gate is the $\beta=\infty$ limit of the soft
+penalty (next item). Two cost-function formulations for one purpose;
+the production driver overrides the default to soft mode, so the hard
+mode is a non-default that no shipped code path actually exercises in
+regression.
+\textbf{Fix:} keep the soft formulation only. Set $\beta$ large
+(but finite) when behaviour-equivalent to ``hard'' is wanted.
+
+\paragraph{Soft label penalty $\beta$ and score weight $\gamma$.}
+\PRINCIPLED{} Augmenting the assignment cost with a label-mismatch
+penalty and a low-score penalty is a likelihood-style construction.
+The specific values ($\beta=6.0,\,\gamma=2.0$ in the production driver)
+are unjustified constants but the mechanism is sound, provided one
+formulation (this one) is canonical.
+
+\subsection*{V.5 Update}
+
+\paragraph{Joseph form on full SE(3).}
+\REFERENCE{} Bar-Shalom, Li, Kirubarajan (2001), \S 5.3; Maybeck
+(1979), \S 6.2. PSD by construction.
+
+\paragraph{Translation-only Joseph with $P_{rt}^{\text{post}}=0$.}
+\REDUNDANT{} The shortcut zeros the rotation cross-covariance instead
+of marginalising it. Setting $R_{rot}=\infty$ in the full Joseph
+update yields the same translation block \emph{and} a properly
+marginalised rotation block via the Schur complement (Maybeck,
+\S 6.2; Crassidis \& Junkins, \emph{Optimal Estimation of Dynamic
+Systems}, 2011, \S 3.5). The current path discards the
+lever-arm-coupled rotation information that translation observations
+actually carry through the off-diagonal $[t]_\times R$ blocks of
+$\Ad(T)$.
+\textbf{Fix:} use the full Joseph form with $R_{rot}$ a large finite
+number. The rotation block then updates correctly and the code path
+is unified with the ICP update.
+
+\paragraph{Held-track prefilters (\texttt{held\_meas\_radius\_m}=$0.25$,
+\texttt{held\_meas\_innov\_max\_m}=$0.20$).}
+\REDUNDANT{} Two ad-hoc Euclidean gates added on top of the $\chi^2$
+gate, the residual cap, and the held-mode $Q$. Four overlapping
+mechanisms guard one update. The principled mechanism is the
+held-mode $Q$ schedule (large during grasping/releasing, small during
+holding) which already encodes the physically expected innovation.
+\textbf{Fix:} remove the prefilters. Trust the $Q$ schedule and the
+$\chi^2$ gate.
+
+\paragraph{One-shot ICP at admission.}
+\PRINCIPLED{} Pragmatic compute budget: ICP per frame is expensive,
+ICP once at birth gives a reasonable rotation prior. The known
+weakness (no rotation refinement post-admission) is documented and
+acknowledged. Reference: Besl \& McKay, ``A Method for Registration
+of 3-D Shapes'' (IEEE PAMI, 1992).
+
+\paragraph{Three ICP backends (\texttt{centroid} / \texttt{icp\_chain}
+/ \texttt{icp\_anchor}).}
+\REDUNDANT{} Default is \texttt{icp\_chain}; the other two are
+documented as ``what the original integration test used'' and ``strict
+decomposition'' respectively, and neither is exercised by any
+production test.
+\textbf{Fix:} keep \texttt{icp\_chain}; move \texttt{centroid} and
+\texttt{icp\_anchor} to a dedicated \texttt{tests/icp\_backends/}
+fixture, or delete.
+
+\paragraph{Huber inner / outer reweight.}
+\REFERENCE{} Huber, ``Robust Estimation of a Location Parameter''
+(Annals of Math.~Stat., 1964); Zhang, ``Parameter Estimation
+Techniques: A Tutorial'' (Image \& Vision Computing, 1997).
+
+\paragraph{Adaptive Barron robust loss (slow tier only).}
+\REFERENCE{} Chebrolu, Magistri, L\"abe, Stachniss, ``Adaptive Robust
+Kernels for Non-Linear Least Squares Problems'' (IEEE RA-L, 2021).
+Cited explicitly in the module header
+\texttt{perception/adaptive\_kernel.py:2}.
+
+\paragraph{World-frame composition $\mu_{wo},\Sigma_{wo}$
+(\eqref{eq:world_compose}).}
+\PRINCIPLED{} First-order propagation of the joint
+$(T_{wb},\mu_{bo})$ uncertainty under deterministic composition,
+treating $T_{wb}$ and $\mu_{bo}$ as independent. Standard lever-arm
+arithmetic; see Barfoot (2017), \S 7.5.
+
+\paragraph{Dual update primitives (\texttt{update\_observation} vs
+\texttt{update\_observation\_centroid}).}
+\REDUNDANT{} Two implementations of the same primitive: full-SE(3)
+Joseph and translation-only Joseph. The centroid form is the special
+case of the full form with $R_{rot}\to\infty$. The duplication is
+also mirrored into \texttt{rbpf\_state.py}, giving four implementations
+of one primitive.
+\textbf{Fix:} implement once in the full form; the centroid case is
+recovered by passing $R_{rot}$ large.
+
+\subsection*{V.6 Birth and prune}
+
+\paragraph{Bernoulli existence updates ($r$-predict, $r$-assoc, $r$-miss).}
+\REFERENCE{} Mahler (2014), Ch.~7--8; Vo, Vo, Hoseinnezhad, ``Robust
+Multi-Bernoulli Filtering'' (IEEE J.~STSP, 2013).
+
+\paragraph{Birth existence $r_0=\lambda_b\hat s/(\lambda_b\hat s+\lambda_c)$.}
+\REFERENCE{} Vo \& Vo (IEEE TSP, 2009). Standard CB-MeMBer birth.
+
+\paragraph{Confirm-$k$ M-of-N gate.}
+\REFERENCE{} Bar-Shalom \& Fortmann (1988), \S 3. M-out-of-N
+detection is classical track-confirmation.
+
+\paragraph{Confirm-$k$=$3$, score-floor=$0.20$, border-margin=$2$\,px,
+TTL=$30$\,frames, near-live=$0.05$\,m.}
+\REDUNDANT{} Magic numbers tuned for one trajectory's image
+resolution, capture rate, and object scale. Border $2$\,px assumes a
+$640\times 480$ stream; TTL=$30$ frames assumes $30$\,Hz capture;
+near-live=$5$\,cm assumes fruit-sized objects.
+\textbf{Fix:} replace with relative gates --- border $=1\%$ of image
+width, TTL $=N$ seconds at any rate, near-live $=k\sigma_t$ on the
+joint translation cov.
+
+\paragraph{$r_{\min}=10^{-3}$ prune threshold.}
+\PRINCIPLED{} Standard Bernoulli filter pruning on a memory /
+precision tradeoff. The order of magnitude follows directly from the
+floating-point sensitivity of \eqref{eq:r_assoc}.
+
+\paragraph{$r_{\text{held floor}}=0.5$.}
+\REDUNDANT{} Mathematically incoherent. The held seed's posterior
+$r$ should be governed by \eqref{eq:r_miss}; if the model says $r$
+should fall below $0.5$ given the miss-likelihood evidence, it should
+fall. Pinning $r$ above $0.5$ converts it into a non-probability.
+\textbf{Fix:} remove. If a held seed must survive long occlusions,
+encode the prior via $p_d \to 0$ during full occlusion (which is
+exactly what the visibility module is for) rather than by floor-pinning
+the posterior.
+
+\subsection*{V.7 Self-merge}
+
+\paragraph{Information-sum fusion of two Gaussians.}
+\REFERENCE{} Mutambara, \emph{Decentralized Estimation and Control
+for Multisensor Systems} (CRC Press, 1998), \S 4.3. Approximate
+(independence assumed) but the standard track-to-track fusion form.
+
+\paragraph{Same-label gate at fixed $5$\,cm Euclidean
+(\texttt{self\_merge\_trans\_m}=$0.05$).}
+\REDUNDANT{} Fixed-distance, no scale-relative variant. Two adjacent
+fruit at $5$\,cm survive arbitrarily; two SAM-split masks of one
+cabinet collapse arbitrarily.
+\textbf{Fix:} replace with $d^2_t \le \chi^2_3(0.95)=7.815$ on the
+joint translation cov $P_{tt,o}+P_{tt,d}$.
+
+\paragraph{Protected-pairs gate (relations-derived $\mathcal P$).}
+\PRINCIPLED{} If the scene graph asserts two oids are physically
+distinct (e.g.\ apple on tray), they must not collapse. Direct logical
+consequence of the relation semantics.
+
+\subsection*{V.8 Visibility}
+
+\paragraph{Continuous $p_v$ in miss-frame likelihood
+($\tilde p_d=p_d\cdot p_v$).}
+\PRINCIPLED{} Standard Bernoulli filter convention under known
+visibility (Mahler, 2014, \S 7.6).
+
+\paragraph{Fibonacci-sphere visibility predicate.}
+\REDUNDANT{} The principled visibility test is a depth-test against
+the per-object TSDF / SDF (Newcombe et al., ``KinectFusion: Real-Time
+Dense Surface Mapping and Tracking,'' ISMAR 2011). The spherical
+fallback is wrong for any non-spherical object: a flat tray seen
+edge-on registers near-zero $p_v$ even when fully visible from above.
+\textbf{Fix:} implement TSDF-projection visibility per-object, or
+demote the visibility module to a binary in-frustum test only.
+
+\subsection*{V.9 Relations}
+
+\paragraph{Per-edge EMA smoothing ($\alpha=0.3$, threshold $0.5$).}
+\PRINCIPLED{} First-order low-pass to reject single-frame backend
+flicker. The mechanism (any digital-filter text) is sound; the
+specific $\alpha$ is a time-constant choice but does not affect
+correctness.
+
+\paragraph{Trigger gate (event triggers $+$ every-$90$-frame heartbeat).}
+\REDUNDANT{} The event-trigger set (first call, release transitions,
+new-oid arrivals) covers every state change that could alter the scene
+graph. The $90$-frame periodic backstop is a hedge against unspecified
+event-coverage gaps.
+\textbf{Fix:} drop the heartbeat. If the event set under-covers, audit
+the event set instead of patching with periodic re-fires.
+
+\paragraph{Convention swap (parent=supported, child=supporter, against
+the LLM's $j$-on-$i$).}
+\REDUNDANT{} Exists to fix a sign-error regression. Two conventions
+mixed in one codebase, with a swap at every emission point.
+\textbf{Fix:} canonicalise once at the LLM client boundary --- the
+output convention should match held-set expansion's parent/child
+semantics directly. No swap.
+
+\subsection*{V.10 Held-set expansion}
+
+\paragraph{Closure under in/on edges.}
+\PRINCIPLED{} Held-set semantics: anything supported by the held seed
+is also held. Direct logical consequence.
+
+\paragraph{Iteration cap of $8$.}
+\REDUNDANT{} A fixed cap on a fixpoint iteration cannot accommodate
+arbitrary chain depth. Containment chains in real scenes can exceed
+$8$ (item-on-bowl-on-tray-on-cart-on-shelf-\ldots).
+\textbf{Fix:} run the closure to convergence with a
+\texttt{while changed:} loop. Worst case is $O(N\cdot|\mathcal E|)$,
+still trivial.
+
+\subsection*{V.11 Gravity-aware release}
+
+\paragraph{Voxel observability grid (3-state with hit / pass hysteresis).}
+\REFERENCE{} Hornung, Wurm, Bennewitz, Stachniss, Burgard, ``OctoMap:
+An Efficient Probabilistic 3D Mapping Framework Based on Octrees''
+(Auton.~Robots, 2013). The 3-state model is a coarse simplification
+of OctoMap's log-odds occupancy update with explicit hysteresis instead
+of log-odds clamping.
+
+\paragraph{Voxel-driven $h$ branches \texttt{hit\_occupied} and
+\texttt{all\_empty}.}
+\PRINCIPLED{} Both have unambiguous geometric semantics: a clean
+surface terminates the column at a known $h^\star$; a fully-empty
+column terminates at the workspace floor.
+
+\paragraph{Voxel-driven $h$ branches \texttt{mixed\_unseen} extra
+inflation and \texttt{all\_unseen} midpoint heuristic.}
+\REDUNDANT{} The midpoint choice for \texttt{all\_unseen} is an
+arbitrary compromise between worst-case and best-case; the
+\texttt{mixed\_unseen} ``path-uncertainty'' inflation $(h_u-h^\star)/2$
+has no derivation.
+\textbf{Fix:} for \texttt{all\_unseen}, return a flat uninformative
+prior over the reachable depth range (uniform distribution lifted to
+the EKF as a Gaussian with matching first two moments). Drop the
+\texttt{mixed\_unseen} extra inflation.
+
+\paragraph{Object dynamics table $(e,\mu,\text{shape},r_{\text{obj}})$
+for six labels (\texttt{apple, milkbox, cola, cup, pot, flowerpot}).}
+\REDUNDANT{} Six labels, values cited as ``from agricultural /
+engineering literature'' with no per-label paper, plus a silent fallback
+for every other label. Brittle to ontology drift; the
+dynamics-conditioned $\sigma$ field of the gravity prior contributes at
+most one frame of covariance and is then either confirmed or overwritten
+by subsequent observations.
+\textbf{Fix:} replace the table with one conservative prior
+$P_{\text{drop}}=\mathrm{diag}((10\,\text{cm})^2{\times}3,\,(\pi/2)^2{\times}3)$
+(or similar). Let the EKF re-converge from observations.
+
+\paragraph{Parametric dispersion model
+(\eqref{eq:gravity_sigma}: $\sigma_{xy},\sigma_z,\sigma_{\text{yaw}}$
+in terms of $h$, $e$, $r_{\text{obj}}$, $\bm v_{\text{rel}}$).}
+\REDUNDANT{} The functional forms are invented: the bounce term
+$\sigma_{\text{bounce}}\propto v_{\text{impact}}/(1-e)$ has no
+impact-mechanics citation; the yaw term
+$\sigma_{\text{yaw}}=\pi(1-\exp(-h(1-e^2)/r_{\text{obj}}))$ is fitted,
+not derived. The constant $\varepsilon_{\text{rough}}=5\!\cdot\!10^{-3}$
+carries the source comment ``tune empirically on the apple\_drop
+trajectory'' --- an explicit admission that the value is fitted on one
+trajectory.
+\textbf{Fix:} delete the dispersion model. Replace with the constant
+prior above. The EKF posterior after two or three subsequent frames
+of valid detection is indistinguishable from the dispersion-model
+output, and this version has no scenario-tied tuning.
+
+\paragraph{One-shot release-trigger
+(\textsc{Releasing}$\to$\textsc{Idle}, overwrite EKF state once).}
+\REDUNDANT{} A proper Bayesian filter has a
+\textsc{Falling}/\textsc{Settling} regime that runs every frame
+between holding and re-observation. The one-shot is a hack to avoid
+implementing a continuous ballistic predict.
+\textbf{Fix:} add a \textsc{Falling} predict to the predict step
+(ballistic motion under gravity until the predicted impact frame, then
+a transition to the constant-prior state); remove the one-shot
+overwrite.
+
+\paragraph{Workspace AABB fixed at $5\times 5\times 3$\,m, $5$\,cm voxel.}
+\REDUNDANT{} Fixed-size hardcoded grid wastes $90\%$ of the volume on
+tabletop scenes and truncates outdoor scenes.
+\textbf{Fix:} derive the AABB from the SLAM map's bounding box plus a
+margin; pick voxel size from $r_{\text{obj}}$ (e.g.~$r_{\text{obj}}/4$)
+at allocation time.
+
+\subsection*{V.12 Gripper FSM}
+
+\paragraph{Four-phase FSM with width hysteresis and stability test.}
+\PRINCIPLED{} Standard FSM with debouncing
+(\AA str\"om \& Murray, \emph{Feedback Systems}, Princeton 2008,
+\S 9). Hysteresis is the textbook anti-flicker mechanism for a
+threshold-driven discrete state.
+
+\paragraph{Width thresholds (closed=$25$\,mm, open=$40$\,mm,
+delta=$5$\,mm, min-frames=$5$).}
+\REDUNDANT{} Tied to one robot's gripper geometry and one frame rate.
+\textbf{Fix:} derive thresholds from the URDF maximum width as
+percentages (closed $=25\%$ of max, open $=50\%$); convert
+\texttt{min\_transition\_frames} to a time constant ($150$\,ms) and
+divide by the frame rate.
+
+\paragraph{Held-oid selection by inside-gripper containment fraction.}
+\PRINCIPLED{} The mask whose 3D points are most-contained in the
+gripper finger volume is, by direct geometric inference, the most
+likely held object. The smallest-mask-area tiebreak is also
+principled (small held items are harder to over-segment than large
+background items).
+
+\subsection*{V.13 Codebase-level redundancies}
+
+\paragraph{\texttt{perception/camera\_pose\_refiner.py} (337 LoC).}
+\REDUNDANT{} Imported only by \texttt{scripts/data\_demo.py} and
+\texttt{scripts/realtime\_app.py}, both legacy. Imports
+\texttt{heuristic\_tracker.scene\_object} from the heuristic tracker
+that the EKF replaced.
+\textbf{Fix:} delete the module and its two callers.
+
+\paragraph{Slow tier in \texttt{ekf\_tracker/factor\_graph.py} (when
+not promoted).}
+\PRINCIPLED{} The slow tier is a factor-graph smoother that fires only
+when explicitly promoted. As an out-of-band module this is
+acceptable; it is not on the production fast-tier critical path.
+
+\paragraph{\texttt{ekf\_tracker/manipulation/gripper\_state\_inferrer.py}
+($45$-line shim).}
+\PRINCIPLED{} Driver-side wrapper that adapts
+\texttt{utils/gripper\_state.py:GripperPhaseTracker} to the
+tracker-coupling shape used by the EKF. Acceptable separation of
+concerns; the FSM logic itself is not duplicated.
+
+\subsection*{V.14 Tally and recommendation}
+
+Of the $58$ components catalogued above:
+\begin{itemize}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item $\textbf{13}$ are \textbf{Reference}-justified (Bernoulli MTT
+  literature, Bar-Shalom and Mahler, Joseph form, Munkres, Huber,
+  Barron / Chebrolu, OctoMap).
+\item $\textbf{19}$ are \textbf{Principled} (algebraic, geometric, or
+  Bayesian consequences with no useful citation beyond the obvious).
+\item $\textcolor{red}{\textbf{26}}$ are
+  \textcolor{red}{\textbf{REDUNDANT}}.
+\end{itemize}
+
+The redundancies cluster around four loci:
+\begin{enumerate}[leftmargin=1.5em,itemsep=0pt,topsep=2pt]
+\item \textbf{Predict patches (V.2):} the keyframe-freeze /
+  $Q$-schedule / saturation triple together patch a problem that would
+  not exist under an honest fixed $Q$.
+\item \textbf{Update overlap (V.4--V.5):} four overlapping admission
+  gates (\texttt{max\_residual\_m}, \texttt{held\_meas\_radius\_m},
+  \texttt{held\_meas\_innov\_max\_m}, plus the $\chi^2$ gate) and a
+  trans-only Joseph that discards rotation information instead of
+  marginalising it.
+\item \textbf{Gravity-predict subsystem (V.11):} an entire 200+ LoC
+  subsystem ($\sigma_{xy},\sigma_z,\sigma_{\text{yaw}}$, label-conditioned
+  restitution table, four-state column classification) that contributes
+  one frame of covariance and is empirically tuned on
+  \texttt{apple\_drop}.
+\item \textbf{Magic-number ribbon (V.6 / V.12):} fixed birth, FSM,
+  workspace, and self-merge constants that tie the system to one
+  trajectory's image resolution, capture rate, robot platform, and
+  object scale.
+\end{enumerate}
+Removing the $26$ redundant items is estimated to simplify the codebase
+by $30$--$40\%$ (the gravity-predict subsystem alone is a quarter of
+the redundancy mass) without changing any production-validated
+behaviour, since none of the redundant items is exercised by an
+external regression test that is not equally satisfied by its proposed
+replacement.
 
 \end{document}

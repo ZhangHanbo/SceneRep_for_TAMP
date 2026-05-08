@@ -41,16 +41,14 @@ from perception.visibility import visibility_p_v
 # call sites (Hungarian d², matched-update innovation diagnostics,
 # the actual EKF update); same value everywhere keeps gate / cost /
 # update consistent.
-_CENTROID_R_CAM_STD_M = 0.02
-_R_CENT_CAM_3D = np.diag([_CENTROID_R_CAM_STD_M ** 2] * 3)
-# Rotation-decoupling: centroid measurement carries no rotation info,
-# so the 6D-shaped innovation pads the rotation block with ∞ so it
-# falls out of every solve.
-_ROTATION_DECOUPLE_VAR = 1e6
-
-# Per-frame slack covariance for the rigid-attachment predict (grip
-# slip / deformation). Tiny on top of Ad·P·Adᵀ.
-_Q_MANIP_SLACK = np.diag([1e-6] * 3 + [1e-6] * 3)
+# Module-level fast-tier noise constants removed --- the values are
+# now driven by ``ekf_tracker/configs/default.yaml`` (section
+# ``fast_tier_noise:``). The (3,3) centroid measurement covariance and
+# the rigid-attachment slack diagonal are exposed on the
+# ``GaussianEkfTracker`` instance as ``self._fast_tier_noise``.
+#
+# Note: ``_ROTATION_DECOUPLE_VAR`` and ``_Q_MANIP_SLACK`` were defined
+# but never consumed in the runtime code; they have been removed.
 
 
 class GaussianEkfTracker:
@@ -100,8 +98,13 @@ class GaussianEkfTracker:
     def __init__(self,
                  K: np.ndarray,
                  bernoulli_cfg: BernoulliConfig,
+                 *,
                  pose_method: str = "icp_chain",
-                 T_bc: Optional[np.ndarray] = None):
+                 T_bc: Optional[np.ndarray] = None,
+                 visibility_kwargs: Optional[Dict[str, Any]] = None,
+                 det_dedup_kwargs: Optional[Dict[str, Any]] = None,
+                 process_noise_schedule: Optional[Dict[str, Any]] = None,
+                 fast_tier_noise: Optional[Dict[str, Any]] = None):
         self.K = np.asarray(K, dtype=np.float64)
         self.cfg = bernoulli_cfg
         self.pose_est = PoseEstimator(K=self.K, method=pose_method)
@@ -112,8 +115,31 @@ class GaussianEkfTracker:
         # part of the recursion touches T_wb / Σ_wb.
         self.state = GaussianState(
             T_bc=T_bc,
-            P_min_diag=getattr(bernoulli_cfg, "P_min_diag", None),
+            P_min_diag=bernoulli_cfg.P_min_diag,
         )
+        # Per-call kwargs for visibility_p_v + det_dedup.suppress_subpart_detections,
+        # plus the process-noise schedule. If any is None, lazy-load
+        # from the canonical default config; allows constructors that
+        # don't yet pass these explicitly to work.
+        if (visibility_kwargs is None or det_dedup_kwargs is None
+                or process_noise_schedule is None or fast_tier_noise is None):
+            from ekf_tracker.configs import (
+                load_config, build_visibility_kwargs, build_det_dedup_kwargs,
+                build_process_noise_schedule, build_fast_tier_noise_config,
+            )
+            _ek_cfg = load_config()
+            if visibility_kwargs is None:
+                visibility_kwargs = build_visibility_kwargs(_ek_cfg)
+            if det_dedup_kwargs is None:
+                det_dedup_kwargs = build_det_dedup_kwargs(_ek_cfg)
+            if process_noise_schedule is None:
+                process_noise_schedule = build_process_noise_schedule(_ek_cfg)
+            if fast_tier_noise is None:
+                fast_tier_noise = build_fast_tier_noise_config(_ek_cfg)
+        self._visibility_kwargs = dict(visibility_kwargs)
+        self._det_dedup_kwargs = dict(det_dedup_kwargs)
+        self._process_noise_schedule = dict(process_noise_schedule)
+        self._fast_tier_noise = dict(fast_tier_noise)
         self.object_labels: Dict[int, str] = {}
         self.frames_since_obs: Dict[int, int] = {}
         self.existence: Dict[int, float] = {}
@@ -325,11 +351,8 @@ class GaussianEkfTracker:
         T_wb = getattr(self.state, "T_wb", None)
         T_bc = getattr(self.state, "T_bc", None)
         cfg = BirthGateConfig(
-            birth_min_dist_m=float(
-                getattr(self.cfg, "birth_min_dist_m", 0.05)),
-            held_birth_radius_m=float(
-                getattr(self.cfg, "held_birth_radius_m",
-                         getattr(self.cfg, "birth_min_dist_m", 0.05))),
+            birth_min_dist_m=float(self.cfg.birth_min_dist_m),
+            held_birth_radius_m=float(self.cfg.held_birth_radius_m),
         )
         return is_near_live_track(
             det,
@@ -372,7 +395,8 @@ class GaussianEkfTracker:
             tracks.append(entry)
         K = self.cfg.K if self.cfg.K is not None else self.K
         img_shape = self.cfg.image_shape or image_shape
-        return visibility_p_v(tracks, K, depth, img_shape)
+        return visibility_p_v(tracks, K, depth, img_shape,
+                               **self._visibility_kwargs)
 
     # ────────── one step ──────────
     def step(self,
@@ -462,6 +486,7 @@ class GaussianEkfTracker:
                 frames_since_observation=self.frames_since_obs.get(oid, 0),
                 frame="base",  # <- base-frame Q now (legacy "world" param
                                 #    was a misnomer for the RBPF path).
+                schedule=self._process_noise_schedule,
             )
         # Held oids are FULLY SKIPPED here; their motion is owned by the
         # rigid-attachment branch below (μ ← ΔT_bg · μ). Applying u_k to
@@ -490,9 +515,13 @@ class GaussianEkfTracker:
             delta_T_bg = T_bg @ np.linalg.inv(self._prev_T_bg)
             Q_seed = process_noise_for_phase(
                 phase=phase, is_target=True, frame="base",
+                frames_since_observation=0,
+                schedule=self._process_noise_schedule,
             )
             Q_transitive = process_noise_for_phase(
                 phase="holding", is_target=True, frame="base",
+                frames_since_observation=0,
+                schedule=self._process_noise_schedule,
             )
             for oid in held_oids:
                 if oid in self.state.objects:
@@ -517,11 +546,11 @@ class GaussianEkfTracker:
         # detection in the SAME frame. Survivors are spatially disjoint.
         detections, subpart_absorbed = suppress_subpart_detections(
             list(detections), depth, self.K,
-            voxel_size=getattr(self.cfg, "dedup_voxel_size_m", 0.02),
-            containment_thresh=getattr(
-                self.cfg, "dedup_containment_thresh", 0.8),
-            require_same_label=getattr(
-                self.cfg, "dedup_require_same_label", False),
+            voxel_size=self.cfg.dedup_voxel_size_m,
+            containment_thresh=self.cfg.dedup_containment_thresh,
+            require_same_label=self.cfg.dedup_require_same_label,
+            min_depth=self._det_dedup_kwargs["min_depth"],
+            max_depth=self._det_dedup_kwargs["max_depth"],
         )
         dbg["subpart_absorbed"] = subpart_absorbed
         # Filled in below by the centroid-validity loop. Initialised
@@ -586,7 +615,7 @@ class GaussianEkfTracker:
                               R_icp: np.ndarray):
             centroid_cam = np.asarray(T_co, dtype=np.float64)[:3, 3]
             stats3 = self.state.centroid_innovation_stats(
-                oid, centroid_cam, R_cam=_R_CENT_CAM_3D)
+                oid, centroid_cam, R_cam=self._fast_tier_noise["centroid_r_cam_3d"])
             if stats3 is None:
                 return None
             nu3, S3, d2_3, logL3 = stats3
@@ -782,7 +811,7 @@ class GaussianEkfTracker:
         # fitness/rmse gate (T_co is None) are demoted to miss/birth.
         consumed_global: set = set()
         dbg["matched"] = []
-        held_meas_radius = float(getattr(self.cfg, "held_meas_radius_m", 0.0))
+        held_meas_radius = float(self.cfg.held_meas_radius_m)
         for oid, l_local in list(assoc.match.items()):
             l_global = det_idx_in_assoc[l_local]
             det = dets_with_pose[l_global]
@@ -893,7 +922,7 @@ class GaussianEkfTracker:
                 # R_rot into the translation block).
                 centroid_cam = det["_centroid_cam"]
                 stats3 = self.state.innovation_stats_centroid_3d(
-                    oid, centroid_cam, R_cam=_R_CENT_CAM_3D)
+                    oid, centroid_cam, R_cam=self._fast_tier_noise["centroid_r_cam_3d"])
                 if stats3 is None:
                     continue
                 nu3, S3, d2_t, log_lik = stats3
@@ -967,7 +996,7 @@ class GaussianEkfTracker:
                     oid=oid,
                     centroid_cam=det["_centroid_cam"],
                     # 2 cm std (matched to assoc R_cam).
-                    R_cam=_R_CENT_CAM_3D,
+                    R_cam=self._fast_tier_noise["centroid_r_cam_3d"],
                     huber_w=w, P_max=self.cfg.P_max,
                 )
             else:
@@ -1025,7 +1054,7 @@ class GaussianEkfTracker:
         # occluded by the fingers (no visible mask → no match → would
         # otherwise prune after enough miss frames).
         dbg["missed"] = []
-        r_held_floor = float(getattr(self.cfg, "r_held_floor", 0.0))
+        r_held_floor = float(self.cfg.r_held_floor)
         # Pre-compute helpers for "why didn't this oid match?".
         gate_trans = float(self.cfg.G_out_trans)
         d2t_mat = (assoc.d2_trans_matrix
@@ -1183,7 +1212,7 @@ class GaussianEkfTracker:
                 self._pending_births.pop(pid_key, None)
 
         # TTL-expire stale pending entries (perception id disappeared).
-        ttl = int(getattr(self.cfg, "birth_pending_ttl_frames", 30))
+        ttl = int(self.cfg.birth_pending_ttl_frames)
         if ttl > 0 and self._pending_births:
             cutoff = self._frame_count - ttl
             stale = [k for k, p in self._pending_births.items()
@@ -1277,7 +1306,7 @@ class GaussianEkfTracker:
         never collapse regardless of how close the centroids drift.
         """
         cfg = self.cfg
-        gate_m = float(getattr(cfg, "self_merge_trans_m", 0.0))
+        gate_m = float(cfg.self_merge_trans_m)
         if gate_m <= 0.0:
             return []
         merges: List[Dict[str, Any]] = []

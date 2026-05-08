@@ -1,0 +1,73 @@
+# =============================================================================
+# configs/ekf_tracker/customization.yaml
+#
+# The single user-facing customization YAML. Inherits everything from
+# `ekf_tracker/configs/default.yaml` via `_extends:` and overrides only
+# the REFERENCE- and PRINCIPLED-justified knobs from Part V of the
+# Bernoulli-EKF doc that are actually consumed by the runtime code.
+#
+# Two-hierarchy contract: this file (the customization) and
+# `ekf_tracker/configs/default.yaml` (the canonical default) are the
+# ONLY config files. No env-var overrides, no test fixtures, no third
+# YAML.
+#
+# Pruned: dead BernoulliConfig fields (r_conf, enable_visibility,
+# icp_method / icp_min_fitness / icp_max_rmse, relation_backend /
+# relation_server_url / relation_llm_model / relation_score_threshold /
+# relation_on_*, gravity_predict, etc.) --- these have zero runtime
+# readers; setting them in YAML does nothing. See default.yaml's
+# header for the full list and the live wiring path for each.
+#
+# Loading:
+#     from ekf_tracker.configs import load_config, to_bernoulli_config
+#     cfg  = load_config("configs/ekf_tracker/customization.yaml")
+#     bcfg = to_bernoulli_config(cfg, K=K, image_shape=(480, 640))
+# =============================================================================
+
+_extends: ekf_tracker/configs/default.yaml
+
+bernoulli:
+  # ── Bernoulli existence model (REFERENCE: Mahler 2014; Vo & Vo 2009) ─
+  association_mode: hungarian
+  p_s:      1.0
+  p_d:      0.9
+  lambda_c: 1.0
+  lambda_b: 1.0
+
+  # ── Probabilistic gates (REFERENCE: Bar-Shalom 2001 §3.3) ────────────
+  gate_mode:    trans     # 'full' | 'trans' | 'trans_and_rot'
+  cost_d2_mode: sum       # 'full' | 'trans' | 'sum'
+
+  # ── Mode switches (PRINCIPLED) ──────────────────────────────────────
+  enable_huber:    true
+  init_cov_from_R: false
+
+  # ── Soft-mode label/score augmentation (PRINCIPLED mechanism) ───────
+  hungarian_label_penalty: 6.0
+  hungarian_score_weight:  2.0
+
+  # ── Subpart suppression (PRINCIPLED: 3D NMS) ────────────────────────
+  dedup_voxel_size_m:        0.02
+  dedup_containment_thresh:  0.8
+  dedup_require_same_label:  false
+
+  # ── ICP quality gates at birth (PRINCIPLED) ─────────────────────────
+  birth_fitness_min: 0.5
+  birth_rmse_max:    0.02
+
+  # ── Per-axis P_bo floor (PRINCIPLED: perception-jitter floor) ───────
+  # Rotation entries written as 0.0025000000000000005 (not 2.5e-3) so
+  # they match `0.05**2` bit-exactly; IEEE 754 rounds the square one ULP
+  # above 0.0025.
+  P_min_diag: [2.5e-5, 2.5e-5, 2.5e-5, 0.0025000000000000005, 0.0025000000000000005, 0.0025000000000000005]
+
+
+# Slow-tier scheduler --- override these (and pass the result as
+# EkfTracker(trigger=to_trigger_config(cfg))) to opt in to slow-tier
+# fires. The default.yaml values are all-off to mirror EkfTracker's
+# implicit no-arg construction.
+trigger:
+  on_grasp:                false
+  on_release:              false
+  on_new_object:           false
+  periodic_every_n_frames: -1

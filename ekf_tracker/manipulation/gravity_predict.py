@@ -30,7 +30,7 @@ Voxel-driven adjustment to (h, σ_z):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Mapping, Optional, Tuple
 
 import numpy as np
 
@@ -100,10 +100,11 @@ def predict_landing_pose(
     voxel_obs: Optional[VoxelObservability],
     dyn: ObjectDynamicsProperty,
     *,
-    gravity: float = 9.81,
-    workspace_floor_z: float = -1.0,
-    eps_roughness: float = EPS_ROUGHNESS_DEFAULT,
-    max_drop_m: float = 2.0,
+    gravity: float,
+    workspace_floor_z: float,
+    eps_roughness: float,
+    max_drop_m: float,
+    shape_footprint_factors: Mapping[str, float],
     v_release_world: Optional[np.ndarray] = None,
     live_object_voxels: Iterable[Tuple[float, float, float, float]] = (),
 ) -> Tuple[np.ndarray, np.ndarray, GravityPredictInfo]:
@@ -201,7 +202,8 @@ def predict_landing_pose(
     one_minus_e = max(0.1, 1.0 - e)  # numerical guard
     v_impact = np.sqrt(max(0.0, 2.0 * gravity * h))
     sigma_bounce = eps_roughness * v_impact / one_minus_e
-    sigma_shape = dyn.radius_m * shape_footprint_factor(dyn.shape)
+    sigma_shape = dyn.radius_m * shape_footprint_factor(
+        dyn.shape, factors=shape_footprint_factors)
     if v_release_world is None:
         v_release_xy_norm = 0.0
     else:

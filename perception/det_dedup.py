@@ -38,9 +38,10 @@ VoxelKey = Tuple[int, int, int]
 def voxelize_mask(mask: np.ndarray,
                    depth: np.ndarray,
                    K: np.ndarray,
-                   voxel_size: float = 0.02,
-                   min_depth: float = 0.1,
-                   max_depth: float = 5.0,
+                   *,
+                   voxel_size: float,
+                   min_depth: float,
+                   max_depth: float,
                    ) -> Set[VoxelKey]:
     """Back-project a boolean mask through a depth image into a set of
     voxel keys (camera-frame coordinates quantised to `voxel_size`).
@@ -128,11 +129,12 @@ def suppress_subpart_detections(
     detections: List[Dict[str, Any]],
     depth: np.ndarray,
     K: np.ndarray,
-    voxel_size: float = 0.02,
-    containment_thresh: float = 0.8,
-    require_same_label: bool = False,
-    min_depth: float = 0.1,
-    max_depth: float = 5.0,
+    *,
+    voxel_size: float,
+    containment_thresh: float,
+    require_same_label: bool,
+    min_depth: float,
+    max_depth: float,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Greedy label-agnostic suppression of sub-part detections.
 

@@ -2,10 +2,15 @@
 
 Lifted verbatim from scripts/visualize_ekf_tracking.py to make it
 importable from a library location. Behaviour unchanged.
+
+The ``GripperPhaseTracker`` import is deferred to instantiation time
+to break the import cycle:
+``utils.gripper_state`` → ``ekf_tracker.manipulation.grasp_owner_detector``
+→ ``ekf_tracker/__init__.py`` → ``ekf_tracker.api`` →
+``ekf_tracker.manipulation.gripper_state_inferrer`` → back to
+``utils.gripper_state``.
 """
 from __future__ import annotations
-
-from utils.gripper_state import GripperPhaseTracker as _GripperPhaseTracker
 
 
 class _GripperStateInferrer:
@@ -18,6 +23,8 @@ class _GripperStateInferrer:
     used by the rest of the driver.
     """
     def __init__(self, *args, **kwargs):
+        # Deferred import: see module docstring for the cycle this avoids.
+        from utils.gripper_state import GripperPhaseTracker as _GripperPhaseTracker
         # GraspOwnerDetector is the only kwarg the driver passes that
         # isn't part of GripperPhaseTracker's defaults; pass through
         # everything else by name.

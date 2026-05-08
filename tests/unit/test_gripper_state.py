@@ -14,13 +14,24 @@ class _FakeTrackerState:
     def force_admit(self, det, depth): return None
 
 
+def _make_fsm(**overrides):
+    """Build a ``GripperPhaseTracker`` with all 8 required kwargs.
+    Defaults come from the canonical YAML; tests can override any subset.
+    """
+    from ekf_tracker.configs import (
+        load_config, build_gripper_phase_tracker_kwargs,
+    )
+    kwargs = build_gripper_phase_tracker_kwargs(load_config())
+    kwargs.update(overrides)
+    return GripperPhaseTracker(detector=None, **kwargs)
+
+
 @pytest.fixture
 def fsm():
-    return GripperPhaseTracker(
+    return _make_fsm(
         closed_width_m=0.025, open_width_m=0.040,
         history_size=3, motion_threshold_m=0.005,
         min_transition_frames=2,
-        detector=None,  # FSM-only; no GraspOwnerDetector
     )
 
 
@@ -96,11 +107,11 @@ def test_thick_object_grasp_recognised():
     `grasping`. This is the regression that caused apple_to_cabinate
     to lose tracks during carry.
     """
-    fsm = GripperPhaseTracker(
+    fsm = _make_fsm(
         closed_width_m=0.025, open_width_m=0.040,
         close_delta_m=0.005, history_size=5,
         motion_threshold_m=0.005, min_transition_frames=2,
-        detector=None,
+        # detector=None inherited from _make_fsm
     )
     # Seed open at 0.10 m.
     out = fsm.step(width=0.1004, tracker_state=_FakeTrackerState(),
@@ -120,11 +131,11 @@ def test_thick_object_grasp_recognised():
 def test_open_baseline_resets_on_release():
     """After a full grasp/release cycle, open_baseline_m resets so
     the next cycle re-anchors against a fresh open width."""
-    fsm = GripperPhaseTracker(
+    fsm = _make_fsm(
         closed_width_m=0.025, open_width_m=0.040,
         close_delta_m=0.005, history_size=3,
         motion_threshold_m=0.005, min_transition_frames=1,
-        detector=None,
+        # detector=None inherited from _make_fsm
     )
     # Seed open.
     fsm.step(width=0.10, tracker_state=_FakeTrackerState(),
@@ -158,11 +169,11 @@ def test_width_jitter_stays_open():
     """A small jitter (0.0995 instead of 0.1000) within
     close_delta_m should NOT trigger grasping — that would be
     spurious."""
-    fsm = GripperPhaseTracker(
+    fsm = _make_fsm(
         closed_width_m=0.025, open_width_m=0.040,
         close_delta_m=0.005, history_size=3,
         motion_threshold_m=0.005, min_transition_frames=1,
-        detector=None,
+        # detector=None inherited from _make_fsm
     )
     fsm.step(width=0.10, tracker_state=_FakeTrackerState(),
               T_wb=np.eye(4), T_bg=np.eye(4))

@@ -64,16 +64,25 @@ class TestConstruction:
         g = VoxelObservability(
             voxel_size_m=0.1,
             workspace_aabb=((0.0, 0.0, 0.0), (1.0, 1.0, 0.5)),
+            n_min_hit=2, n_min_pass=3,
         )
         assert g.shape == (10, 10, 5)
 
     def test_invalid_voxel_size_raises(self):
         with pytest.raises(ValueError):
-            VoxelObservability(voxel_size_m=0.0)
+            VoxelObservability(
+                voxel_size_m=0.0,
+                workspace_aabb=((-1.0, -1.0, 0.0), (1.0, 1.0, 2.0)),
+                n_min_hit=2, n_min_pass=3,
+            )
 
     def test_invalid_aabb_raises(self):
         with pytest.raises(ValueError):
-            VoxelObservability(workspace_aabb=((1.0, 0.0, 0.0), (0.0, 1.0, 1.0)))
+            VoxelObservability(
+                voxel_size_m=0.1,
+                workspace_aabb=((1.0, 0.0, 0.0), (0.0, 1.0, 1.0)),
+                n_min_hit=2, n_min_pass=3,
+            )
 
     def test_initial_state_is_all_unseen(self):
         g = _make_grid()
@@ -149,8 +158,8 @@ class TestIntegrateDepth:
             n_min_hit=2,
             n_min_pass=3,
         )
-        g.integrate_depth(depth, K, T_cw, max_range_m=3.0, subsample=1)
-        g.integrate_depth(depth, K, T_cw, max_range_m=3.0, subsample=1)
+        g.integrate_depth(depth, K, T_cw, max_range_m=3.0, subsample=1, min_depth_m=0.05)
+        g.integrate_depth(depth, K, T_cw, max_range_m=3.0, subsample=1, min_depth_m=0.05)
         # voxel at the plane center
         assert g.state_at([0.0, 0.0, plane_z]) == OCCUPIED
 
@@ -164,7 +173,7 @@ class TestIntegrateDepth:
         )
         # 3 frames so n_pass on a free-space voxel reaches threshold
         for _ in range(3):
-            g.integrate_depth(depth, K, T_cw, max_range_m=3.0, subsample=1)
+            g.integrate_depth(depth, K, T_cw, max_range_m=3.0, subsample=1, min_depth_m=0.05)
         # a voxel halfway between camera (z=1.5) and plane (z=0.4) at column center
         assert g.state_at([0.0, 0.0, 1.0]) == EMPTY
 
@@ -177,7 +186,7 @@ class TestIntegrateDepth:
             n_min_pass=3,
         )
         for _ in range(5):
-            g.integrate_depth(depth, K, T_cw, max_range_m=3.0, subsample=1)
+            g.integrate_depth(depth, K, T_cw, max_range_m=3.0, subsample=1, min_depth_m=0.05)
         # below the plane: ray was absorbed at the plane, never observed below
         assert g.state_at([0.0, 0.0, 0.1]) == UNSEEN
 
@@ -232,6 +241,7 @@ class TestRaycastDown:
         g = VoxelObservability(
             voxel_size_m=0.05,
             workspace_aabb=((-1.0, -1.0, -0.5), (1.0, 1.0, 2.0)),
+            n_min_hit=2, n_min_pass=3,
         )
         res = g.raycast_down([0.0, 0.0, 1.0], max_distance_m=1.5, floor_z=-0.4)
         assert res.column_state == "all_unseen"
@@ -264,6 +274,7 @@ class TestRaycastDown:
         g = VoxelObservability(
             voxel_size_m=0.05,
             workspace_aabb=((-1.0, -1.0, -0.5), (1.0, 1.0, 2.0)),
+            n_min_hit=2, n_min_pass=3,
         )
         i, j, k_start = g.world_to_voxel([0.0, 0.0, 1.0])
         _, _, k_obj = g.world_to_voxel([0.0, 0.0, 0.5])
@@ -283,6 +294,7 @@ class TestRaycastDown:
         g = VoxelObservability(
             voxel_size_m=0.05,
             workspace_aabb=((-1.0, -1.0, -0.5), (1.0, 1.0, 2.0)),
+            n_min_hit=2, n_min_pass=3,
         )
         res = g.raycast_down(
             [0.0, 0.0, 1.0], max_distance_m=1.5, floor_z=-0.4,

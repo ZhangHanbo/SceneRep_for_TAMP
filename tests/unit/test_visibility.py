@@ -5,7 +5,23 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from perception.visibility import visibility_p_v, _fibonacci_sphere
+from perception.visibility import (
+    visibility_p_v as _raw_visibility_p_v,
+    _fibonacci_sphere,
+)
+from ekf_tracker.configs import load_config, build_visibility_kwargs
+
+
+_VIS_KWARGS = build_visibility_kwargs(load_config())
+
+
+def visibility_p_v(tracks, K, depth, image_shape, **overrides):
+    """Wrapper that injects YAML-loaded kwargs (post-Phase-D4 the
+    function has no kwarg defaults).
+    """
+    kw = dict(_VIS_KWARGS)
+    kw.update(overrides)
+    return _raw_visibility_p_v(tracks, K, depth, image_shape, **kw)
 
 
 # Fetch-like intrinsics (640 x 480 head camera).

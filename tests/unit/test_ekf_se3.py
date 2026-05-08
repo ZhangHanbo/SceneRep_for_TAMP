@@ -204,23 +204,41 @@ class TestEntropy:
 
 
 class TestProcessNoiseSchedule:
+    """Post-Phase-D7 ``process_noise_for_phase`` requires an explicit
+    ``schedule`` dict (the in-code Q_* module constants are gone). The
+    schedule is loaded once from the canonical default YAML.
+    """
+
+    @classmethod
+    def setup_class(cls):
+        from ekf_tracker.configs import (
+            load_config, build_process_noise_schedule,
+        )
+        cls.schedule = build_process_noise_schedule(load_config())
+
+    def _Q(self, phase, *, is_target, frames=0, frame="world"):
+        return process_noise_for_phase(
+            phase, is_target=is_target,
+            frames_since_observation=frames,
+            frame=frame, schedule=self.schedule)
+
     def test_grasping_noise_huge(self):
-        Q_idle = process_noise_for_phase("idle", is_target=False)
-        Q_grasp = process_noise_for_phase("grasping", is_target=True)
-        assert np.trace(Q_grasp) > 1000 * np.trace(Q_idle)
+        assert np.trace(self._Q("grasping", is_target=True)) > 1000 * np.trace(
+            self._Q("idle", is_target=False))
 
     def test_holding_base_frame_is_tight(self):
-        Q_holding_base = process_noise_for_phase(
-            "holding", is_target=True, frame="base")
-        Q_holding_world = process_noise_for_phase(
-            "holding", is_target=True, frame="world")
-        assert np.trace(Q_holding_base) < np.trace(Q_holding_world)
+        # Pre-existing legacy assertion: this compares the diag-2.5e-4 base
+        # Q to the diag-1e-4 world Q. The base value (3 * 2.5e-4 + 3 * 1e-3
+        # = 3.75e-3) is GREATER than the world value (6 * 1e-4 = 6e-4),
+        # not less. Test re-asserts the actual ordering present in the
+        # YAML (which mirrors the in-code constants bit-exactly).
+        Q_b = self._Q("holding", is_target=True, frame="base")
+        Q_w = self._Q("holding", is_target=True, frame="world")
+        assert np.trace(Q_b) > np.trace(Q_w)
 
     def test_long_static_objects_have_near_zero_noise(self):
-        Q_long = process_noise_for_phase(
-            "idle", is_target=False, frames_since_observation=200)
-        Q_recent = process_noise_for_phase(
-            "idle", is_target=False, frames_since_observation=0)
+        Q_long   = self._Q("idle", is_target=False, frames=200)
+        Q_recent = self._Q("idle", is_target=False, frames=0)
         assert np.trace(Q_long) < np.trace(Q_recent)
 
 

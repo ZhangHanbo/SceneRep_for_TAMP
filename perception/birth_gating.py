@@ -23,12 +23,14 @@ import numpy as np
 
 @dataclass
 class BirthGateConfig:
-    """Tuning knobs for :func:`is_near_live_track`.
+    """Tuning knobs for :func:`is_near_live_track`. Required fields ---
+    no dataclass defaults; build via
+    :func:`ekf_tracker.configs.build_birth_gate_config`.
 
     Set both radii to <= 0 to disable the gate entirely.
     """
-    birth_min_dist_m: float = 0.05    # default same-label proximity
-    held_birth_radius_m: float = 0.25  # wider radius for the held oid
+    birth_min_dist_m: float        # default same-label proximity
+    held_birth_radius_m: float     # wider radius for the held oid
 
 
 class BirthGateTrackerLike(Protocol):
@@ -65,8 +67,8 @@ def is_near_live_track(
     mean ``mu_w`` and the gripper proprio anchor ``T_we``) and
     returns the first hit.
     """
-    default_gate = float(getattr(cfg, "birth_min_dist_m", 0.0))
-    held_gate = float(getattr(cfg, "held_birth_radius_m", default_gate))
+    default_gate = float(cfg.birth_min_dist_m)
+    held_gate = float(cfg.held_birth_radius_m)
     if ((default_gate <= 0.0 and held_gate <= 0.0)
             or not tracker.object_labels):
         return None

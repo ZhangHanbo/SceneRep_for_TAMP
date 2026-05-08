@@ -1,10 +1,10 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.11)  2 MAY 2026 14:27
+This is pdfTeX, Version 3.141592653-2.6-1.40.29 (TeX Live 2026) (preloaded format=pdflatex 2026.3.11)  7 MAY 2026 10:04
 entering extended mode
  restricted \write18 enabled.
  file:line:error style messages enabled.
  %&-line parsing enabled.
-**/Volumes/External/Workspace/nus_deliver/SceneRep_for_TAMP/docs/latex/bernoulli_ekf.tex
-(/Volumes/External/Workspace/nus_deliver/SceneRep_for_TAMP/docs/latex/bernoulli_ekf.tex
+**/Volumes/External/Workspace/nus_deliver/SceneRep_for_TAMP/docs/ekf_tracker/latex/bernoulli_ekf.tex
+(/Volumes/External/Workspace/nus_deliver/SceneRep_for_TAMP/docs/ekf_tracker/latex/bernoulli_ekf.tex
 LaTeX2e <2025-11-01>
 L3 programming layer <2026-01-19>
 (/usr/local/texlive/2026/texmf-dist/tex/latex/base/article.cls
@@ -304,30 +304,48 @@ Package: float 2001/11/08 v1.3d Float enhancements (AL)
 )
 \@float@every@algorithm=\toks33
 \c@algorithm=\count324
+) (/usr/local/texlive/2026/texmf-dist/tex/latex/xcolor/xcolor.sty
+Package: xcolor 2024/09/29 v3.02 LaTeX color extensions (UK)
+ (/usr/local/texlive/2026/texmf-dist/tex/latex/graphics-cfg/color.cfg
+File: color.cfg 2016/01/02 v1.6 sample color configuration
+)
+Package xcolor Info: Driver file: pdftex.def on input line 274.
+ (/usr/local/texlive/2026/texmf-dist/tex/latex/graphics-def/pdftex.def
+File: pdftex.def 2025/09/29 v1.2d Graphics/color driver for pdftex
+) (/usr/local/texlive/2026/texmf-dist/tex/latex/graphics/mathcolor.ltx)
+Package xcolor Info: Model `cmy' substituted by `cmy0' on input line 1349.
+Package xcolor Info: Model `hsb' substituted by `rgb' on input line 1353.
+Package xcolor Info: Model `RGB' extended on input line 1365.
+Package xcolor Info: Model `HTML' substituted by `rgb' on input line 1367.
+Package xcolor Info: Model `Hsb' substituted by `hsb' on input line 1368.
+Package xcolor Info: Model `tHsb' substituted by `hsb' on input line 1369.
+Package xcolor Info: Model `HSB' substituted by `hsb' on input line 1370.
+Package xcolor Info: Model `Gray' substituted by `gray' on input line 1371.
+Package xcolor Info: Model `wave' substituted by `hsb' on input line 1372.
 ) (/usr/local/texlive/2026/texmf-dist/tex/latex/l3backend/l3backend-pdftex.def
 File: l3backend-pdftex.def 2025-10-09 L3 backend support: PDF output (pdfTeX)
 \l__color_backend_stack_int=\count325
 ) (./bernoulli_ekf.aux)
 \openout1 = `bernoulli_ekf.aux'.
 
-LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
-LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 24.
-LaTeX Font Info:    ... okay on input line 24.
+LaTeX Font Info:    Checking defaults for OML/cmm/m/it on input line 33.
+LaTeX Font Info:    ... okay on input line 33.
+LaTeX Font Info:    Checking defaults for OMS/cmsy/m/n on input line 33.
+LaTeX Font Info:    ... okay on input line 33.
+LaTeX Font Info:    Checking defaults for OT1/cmr/m/n on input line 33.
+LaTeX Font Info:    ... okay on input line 33.
+LaTeX Font Info:    Checking defaults for T1/cmr/m/n on input line 33.
+LaTeX Font Info:    ... okay on input line 33.
+LaTeX Font Info:    Checking defaults for TS1/cmr/m/n on input line 33.
+LaTeX Font Info:    ... okay on input line 33.
+LaTeX Font Info:    Checking defaults for OMX/cmex/m/n on input line 33.
+LaTeX Font Info:    ... okay on input line 33.
+LaTeX Font Info:    Checking defaults for U/cmr/m/n on input line 33.
+LaTeX Font Info:    ... okay on input line 33.
+LaTeX Font Info:    Checking defaults for PD1/pdf/m/n on input line 33.
+LaTeX Font Info:    ... okay on input line 33.
+LaTeX Font Info:    Checking defaults for PU/pdf/m/n on input line 33.
+LaTeX Font Info:    ... okay on input line 33.
 
 *geometry* driver: auto-detecting
 *geometry* detected driver: pdftex
@@ -373,188 +391,313 @@ Package: trig 2023/12/02 v1.11 sin cos tan (DPC)
 File: graphics.cfg 2016/06/04 v1.11 sample graphics configuration
 )
 Package graphics Info: Driver file: pdftex.def on input line 106.
- (/usr/local/texlive/2026/texmf-dist/tex/latex/graphics-def/pdftex.def
-File: pdftex.def 2025/09/29 v1.2d Graphics/color driver for pdftex
+)
+\Gin@req@height=\dimen181
+\Gin@req@width=\dimen182
+)
+Package hyperref Info: Link coloring OFF on input line 33.
+ (./bernoulli_ekf.out) (./bernoulli_ekf.out)
+\@outlinefile=\write3
+\openout3 = `bernoulli_ekf.out'.
+
  (/usr/local/texlive/2026/texmf-dist/tex/context/base/mkii/supp-pdf.mkii
 [Loading MPS to PDF converter (version 2006.09.02).]
 \scratchcounter=\count326
-\scratchdimen=\dimen181
+\scratchdimen=\dimen183
 \scratchbox=\box59
 \nofMPsegments=\count327
 \nofMParguments=\count328
 \everyMPshowfont=\toks34
 \MPscratchCnt=\count329
-\MPscratchDim=\dimen182
+\MPscratchDim=\dimen184
 \MPnumerator=\count330
 \makeMPintoPDFobject=\count331
 \everyMPtoPDFconversion=\toks35
-))) (/usr/local/texlive/2026/texmf-dist/tex/latex/epstopdf-pkg/epstopdf-base.sty
+) (/usr/local/texlive/2026/texmf-dist/tex/latex/epstopdf-pkg/epstopdf-base.sty
 Package: epstopdf-base 2020-01-24 v2.11 Base part for package epstopdf
 Package epstopdf-base Info: Redefining graphics rule for `.eps' on input line 485.
  (/usr/local/texlive/2026/texmf-dist/tex/latex/latexconfig/epstopdf-sys.cfg
 File: epstopdf-sys.cfg 2010/07/13 v1.3 Configuration of (r)epstopdf for TeX Live
 ))
-\Gin@req@height=\dimen183
-\Gin@req@width=\dimen184
-)
-Package hyperref Info: Link coloring OFF on input line 24.
- (./bernoulli_ekf.out) (./bernoulli_ekf.out)
-\@outlinefile=\write3
-\openout3 = `bernoulli_ekf.out'.
-
-LaTeX Font Info:    Trying to load font information for U+msa on input line 26.
+LaTeX Font Info:    Trying to load font information for U+msa on input line 35.
  (/usr/local/texlive/2026/texmf-dist/tex/latex/amsfonts/umsa.fd
 File: umsa.fd 2013/01/14 v3.01 AMS symbols A
 )
-LaTeX Font Info:    Trying to load font information for U+msb on input line 26.
+LaTeX Font Info:    Trying to load font information for U+msb on input line 35.
  (/usr/local/texlive/2026/texmf-dist/tex/latex/amsfonts/umsb.fd
 File: umsb.fd 2013/01/14 v3.01 AMS symbols B
 )
-Overfull \hbox (7.67406pt too wide) in paragraph at lines 58--62
- []\OT1/cmr/bx/n/10.95 4. As-so-ci-a-tion.[] \OT1/cmr/m/n/10.95 Translation-only Ma-ha-lanobis with a $\OML/cmm/m/it/10.95 ^^_[]$ \OT1/cmr/m/n/10.95 gate, $\OML/cmm/m/it/10.95 G[] \OT1/cmr/m/n/10.95 = 21\OML/cmm/m/it/10.95 :\OT1/cmr/m/n/10.95 108$, $\OML/cmm/m/it/10.95 R[] \OT1/cmr/m/n/10.95 = (0\OML/cmm/m/it/10.95 :\OT1/cmr/m/n/10.95 02 \OML/cmm/m/it/10.95 m\OT1/cmr/m/n/10.95 )[]\OML/cmm/m/it/10.95 I$\OT1/cmr/m/n/10.95 .
+Overfull \hbox (20.6901pt too wide) in paragraph at lines 75--82
+ []\OT1/cmr/bx/n/10.95 4. As-so-ci-a-tion.[] \OT1/cmr/m/n/10.95 Translation-only Ma-ha-lanobis with a $\OML/cmm/m/it/10.95 ^^_[]$ \OT1/cmr/m/n/10.95 gate at $\OML/cmm/m/it/10.95 G[][]\OT1/cmr/m/n/10.95 21\OML/cmm/m/it/10.95 :\OT1/cmr/m/n/10.95 108$ and $\OML/cmm/m/it/10.95 R[][]\OT1/cmr/m/n/10.95 (0\OML/cmm/m/it/10.95 :\OT1/cmr/m/n/10.95 02 m)[]\OML/cmm/m/it/10.95 I$\OT1/cmr/m/n/10.95 ,
  []
 
 [1
 
 {/usr/local/texlive/2026/texmf-var/fonts/map/pdftex/updmap/pdftex.map}]
-LaTeX Font Info:    Trying to load font information for U+euf on input line 105.
+LaTeX Font Info:    Trying to load font information for U+euf on input line 125.
  (/usr/local/texlive/2026/texmf-dist/tex/latex/amsfonts/ueuf.fd
 File: ueuf.fd 2013/01/14 v3.01 Euler Fraktur
-)
-Overfull \hbox (124.34433pt too wide) in paragraph at lines 119--123
-[]\OT1/cmr/m/n/10.95 The co-vari-ance re-cur-sion now branches on whether the track was ob-served last frame (\OT1/cmtt/m/n/10.95 pose[]update/gaussian[]state.py$\OMS/cmsy/m/n/10.95 !$
- []
-
-
-Overfull \hbox (79.65086pt too wide) in paragraph at lines 129--137
-\OT1/cmtt/m/n/10.95 frames[]since[]obs\OT1/cmr/m/n/10.95 : $1 e[]\OML/cmm/m/it/10.95 I[]$ \OT1/cmr/m/n/10.95 (idle, $\OML/cmm/m/it/10.95 < \OT1/cmr/m/n/10.95 5$), $1 e[]\OML/cmm/m/it/10.95 I[]$ \OT1/cmr/m/n/10.95 ($\OML/cmm/m/it/10.95 < \OT1/cmr/m/n/10.95 50$), $1 e[]\OML/cmm/m/it/10.95 I[]$ \OT1/cmr/m/n/10.95 there-after (\OT1/cmtt/m/n/10.95 ekf[]se3.py$\OMS/cmsy/m/n/10.95 !$ \OT1/cmtt/m/n/10.95 process[]noise[]for[]phase\OT1/cmr/m/n/10.95 ).
- []
-
-[2]
-Overfull \hbox (63.27734pt too wide) in paragraph at lines 222--231
-\OT1/cmr/m/n/10.95 matched la-bel is forced to the sen-tinel $[][] = 10[]$ (big-M). \OT1/cmr/bx/n/10.95 Soft mode \OT1/cmr/m/n/10.95 (\OT1/cmtt/m/n/10.95 enforce[]label[]match=False\OT1/cmr/m/n/10.95 ,
- []
-
-[3{/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/cm-super/cm-super-ts1.enc}]
-Overfull \hbox (17.65666pt too wide) in paragraph at lines 232--241
-\OT1/cmr/m/n/10.95 it is the helper []\OT1/cmtt/m/n/10.95 label[]in[]history[]meaningful(t[]history, d[]label, min[]obs=5, min[]share=0.05)
- []
-
-
-Overfull \hbox (2.42119pt too wide) in paragraph at lines 271--273
-[]\OT1/cmr/bx/n/10.95 Joseph step (translation-only)\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 gaussian[]state.py$\OMS/cmsy/m/n/10.95 !$ \OT1/cmtt/m/n/10.95 update[]observation[]centroid\OT1/cmr/m/n/10.95 . Let
- []
-
-
-Overfull \hbox (10.828pt too wide) in paragraph at lines 287--291
-[]\OT1/cmr/m/n/10.95 For pairs where ICP suc-ceeded (\OT1/cmtt/m/n/10.95 icp[]pose.py\OT1/cmr/m/n/10.95 ), an al-ter-na-tive full-$[](3)$ up-date via \OT1/cmtt/m/n/10.95 joseph[]update
- []
-
-
-Overfull \hbox (104.04263pt too wide) in paragraph at lines 294--301
-\OT1/cmr/m/n/10.95 followed by IEKF in-ner it-er-a-tions and the Joseph form (\OT1/cmtt/m/n/10.95 ekf[]se3.py$\OMS/cmsy/m/n/10.95 !$\OT1/cmtt/m/n/10.95 ekf[]update\OT1/cmr/m/n/10.95 ; \OT1/cmtt/m/n/10.95 object[]belief.py$\OMS/cmsy/m/n/10.95 !$\OT1/cmtt/m/n/10.95 joseph[]update\OT1/cmr/m/n/10.95 ;
- []
-
-[4]
-Overfull \hbox (5.53465pt too wide) in paragraph at lines 307--310
- []\OT1/cmr/bx/n/10.95 World-frame com-po-si-tion.[] \OT1/cmtt/m/n/10.95 gaussian[]state.py$\OMS/cmsy/m/n/10.95 !$\OT1/cmtt/m/n/10.95 collapsed[]object[]world \OT1/cmr/m/n/10.95 re-turns the canon-
- []
-
-
-Overfull \hbox (4.72786pt too wide) in paragraph at lines 323--335
- []\OT1/cmr/bx/n/10.95 World-frame over-write (re-lease hook).[] \OT1/cmtt/m/n/10.95 gaussian[]state.py$\OMS/cmsy/m/n/10.95 !$\OT1/cmtt/m/n/10.95 overwrite[]object[]pose(oid,
- []
-
-
-Overfull \hbox (68.43471pt too wide) in paragraph at lines 323--335
-\OML/cmm/m/it/10.95 T[]$\OT1/cmtt/m/n/10.95 , $\OML/cmm/m/it/10.95 P[]$\OT1/cmtt/m/n/10.95 ) \OT1/cmr/m/n/10.95 forces the EKF state for one oid from a world-frame $(\OML/cmm/m/it/10.95 T; P\OT1/cmr/m/n/10.95 )$ in-put. Used by \OT1/cmtt/m/n/10.95 orchestrator[]gaussian.py
- []
-
-
-Overfull \hbox (13.89648pt too wide) in paragraph at lines 337--348
-\OT1/cmr/bx/n/10.95 chain is NOT the canon-i-cal world-frame source \OT1/cmr/m/n/10.95 | that role be-longs to \OT1/cmtt/m/n/10.95 collapsed[]object[]world
- []
-
-
-Overfull \hbox (9.28632pt too wide) in paragraph at lines 362--365
-\OT1/cmr/m/n/10.95 Birth gates (\OT1/cmtt/m/n/10.95 orchestrator.py$\OMS/cmsy/m/n/10.95 !$ \OT1/cmtt/m/n/10.95 birth[]admissible \OT1/cmr/m/n/10.95 and \OT1/cmtt/m/n/10.95 birth[]gating.py$\OMS/cmsy/m/n/10.95 !$ \OT1/cmtt/m/n/10.95 is[]near[]live[]track\OT1/cmr/m/n/10.95 ): 
- []
-
-[5]
-Overfull \hbox (90.983pt too wide) in paragraph at lines 378--381
-\OT1/cmr/m/n/10.95 Survivors mint a fresh oid via []\OT1/cmtt/m/n/10.95 next[]track[]id()\OT1/cmr/m/n/10.95 , run ICP once on ad-mis-sion (\OT1/cmtt/m/n/10.95 icp[]pose.py$\OMS/cmsy/m/n/10.95 !$\OT1/cmtt/m/n/10.95 PoseEstimate.estimate
- []
-
-
-Overfull \hbox (36.43518pt too wide) in paragraph at lines 406--409
- []\OT1/cmr/bx/n/10.95 Prune.[] $\OML/cmm/m/it/10.95 r[] <$ \OT1/cmtt/m/n/10.95 r[]min\OT1/cmr/m/n/10.95 =$10[]$ deletes, EX-CEPT the held seed, whose ex-is-tence is floored at \OT1/cmtt/m/n/10.95 r[]held[]floor\OT1/cmr/m/n/10.95 =0.5
- []
-
-Package hyperref Info: bookmark level for unknown algorithm defaults to 0 on input line 433.
-LaTeX Font Info:    Trying to load font information for OMS+cmr on input line 446.
-(/usr/local/texlive/2026/texmf-dist/tex/latex/base/omscmr.fd
+) [2] [3{/usr/local/texlive/2026/texmf-dist/fonts/enc/dvips/cm-super/cm-super-ts1.enc}] [4] [5]
+Package hyperref Info: bookmark level for unknown algorithm defaults to 0 on input line 410.
+LaTeX Font Info:    Trying to load font information for OMS+cmr on input line 423.
+ (/usr/local/texlive/2026/texmf-dist/tex/latex/base/omscmr.fd
 File: omscmr.fd 2024/11/19 v2.5n Standard LaTeX font definitions
 )
 LaTeX Font Info:    Font shape `OMS/cmr/m/n' in size <10.95> not available
-(Font)              Font shape `OMS/cmsy/m/n' tried instead on input line 446.
+(Font)              Font shape `OMS/cmsy/m/n' tried instead on input line 423.
  [6] [7]
-Overfull \hbox (21.94006pt too wide) in paragraph at lines 541--550
-\OT1/cmr/m/n/10.95 (\OT1/cmr/m/sc/10.95 Unseen\OT1/cmr/m/n/10.95 /\OT1/cmr/m/sc/10.95 Empty\OT1/cmr/m/n/10.95 /\OT1/cmr/m/sc/10.95 Occupied\OT1/cmr/m/n/10.95 ) plus per-voxel \OT1/cmtt/m/n/10.95 n[]hit \OT1/cmr/m/n/10.95 + \OT1/cmtt/m/n/10.95 n[]pass \OT1/cmr/m/n/10.95 coun-ters with hys-tere-sis ($\OMS/cmsy/m/n/10.95 ^^U$ \OT1/cmtt/m/n/10.95 n[]min[]hit\OT1/cmr/m/n/10.95 =2
+Overfull \hbox (4.92815pt too wide) in paragraph at lines 505--512
+ []\OT1/cmr/bx/n/10.95 Voxel ob-serv-abil-ity.[] \OT1/cmr/m/n/10.95 A dense 3-state grid (\OT1/cmr/m/sc/10.95 Unseen\OT1/cmr/m/n/10.95 /\OT1/cmr/m/sc/10.95 Empty\OT1/cmr/m/n/10.95 /\OT1/cmr/m/sc/10.95 Occupied\OT1/cmr/m/n/10.95 ) plus per-voxel hit/pass
  []
 
-[8]
-Overfull \hbox (4.00175pt too wide) in paragraph at lines 561--563
- []\OT1/cmr/bx/n/10.95 Parametric dis-per-sion model[] \OT1/cmr/m/n/10.95 (\OT1/cmtt/m/n/10.95 pose[]update/gravity[]predict.py$\OMS/cmsy/m/n/10.95 !$\OT1/cmtt/m/n/10.95 predict[]landing[]pose\OT1/cmr/m/n/10.95 ).
- []
-
-LaTeX Font Info:    Trying to load font information for OMS+cmtt on input line 609.
-LaTeX Font Info:    No file OMScmtt.fd. on input line 609.
-
-LaTeX Font Warning: Font shape `OMS/cmtt/m/n' undefined
-(Font)              using `OMS/cmsy/m/n' instead
-(Font)              for symbol `textbraceleft' on input line 609.
-
-
-Overfull \hbox (73.09538pt too wide) in paragraph at lines 609--610
-[]\OT1/cmtt/m/n/10.95 tests/visualize[]ekf[]tracking.py \OT1/cmr/m/n/10.95 (in-stru-mented tracker har-ness) | mu-tates \OT1/cmtt/m/n/10.95 state.objects[oid].\OMS/cmtt/m/n/10.95 f\OT1/cmtt/m/n/10.95 mu[]bo,
- []
-
-
-Overfull \hbox (225.406pt too wide) in paragraph at lines 617--626
- []\OT1/cmr/bx/n/10.95 Toggle.[] \OT1/cmtt/m/n/10.95 BernoulliConfig.gravity[]predict \OT1/cmr/m/n/10.95 (de-fault \OT1/cmtt/m/n/10.95 True\OT1/cmr/m/n/10.95 ) gates the RBPF hook; \OT1/cmtt/m/n/10.95 TwoTierOrchestratorGaussian.gravity[]predict[]enabled
- []
-
-[9]
-Overfull \hbox (0.40405pt too wide) in paragraph at lines 639--642
-[]\OT1/cmr/m/n/10.95 Width thresh-old cross-ings with hys-tere-sis (\OT1/cmtt/m/n/10.95 closed[]width[]m\OT1/cmr/m/n/10.95 =$0\OML/cmm/m/it/10.95 :\OT1/cmr/m/n/10.95 025$ m, \OT1/cmtt/m/n/10.95 open[]width[]m\OT1/cmr/m/n/10.95 =$0\OML/cmm/m/it/10.95 :\OT1/cmr/m/n/10.95 040$ m,
- []
-
-[10]
-Overfull \hbox (42.20789pt too wide) in paragraph at lines 690--728
+[8] [9]
+Overfull \hbox (42.58978pt too wide) in paragraph at lines 625--662
 [] 
  []
 
+[10]
+Underfull \hbox (badness 10000) in paragraph at lines 677--678
+[]\OT1/cmr/m/n/10.95 Public five-method sur-face (\OT1/cmtt/m/n/10.95 detect\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 step\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 get[]scene\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 get[]points\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 smooth\OT1/cmr/m/n/10.95 ):
+ []
+
 [11]
-Overfull \hbox (89.61743pt too wide) in paragraph at lines 731--732
-[]\OT1/cmr/m/n/10.95 State / pre-dict: \OT1/cmtt/m/n/10.95 pose[]update/gaussian[]state.py\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 pose[]update/object[]belief.py\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 pose[]update/ekf[]se3.py 
+Underfull \hbox (badness 10000) in paragraph at lines 679--680
+[]\OT1/cmr/m/n/10.95 Live OWL+SAM2 stream-ing de-tec-tion pipeline be-hind \OT1/cmtt/m/n/10.95 detect\OT1/cmr/m/n/10.95 :
  []
 
 
-Overfull \hbox (235.79626pt too wide) in paragraph at lines 733--734
-[]\OT1/cmr/m/n/10.95 Association / up-date: \OT1/cmtt/m/n/10.95 pose[]update/association.py\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 pose[]update/orchestrator.py\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 gaussian[]state.py::update[]observation[]centroid 
+Underfull \hbox (badness 10000) in paragraph at lines 687--688
+[]\OT1/cmr/m/n/10.95 Lift-to-base and information-sum prim-i-tives used by ICP and self-merge:
  []
 
 
-Overfull \hbox (41.28088pt too wide) in paragraph at lines 734--735
-[]\OT1/cmr/m/n/10.95 Birth / prune: \OT1/cmtt/m/n/10.95 pose[]update/orchestrator.py::birth[]admissible\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 pose[]update/birth[]gating.py 
+Underfull \hbox (badness 10000) in paragraph at lines 688--689
+[]\OT1/cmr/m/n/10.95 Append-only per-track ICP-measurement chain (di-ag-nos-tic, smoother sub-strate):
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 689--690
+[]\OT1/cmr/m/n/10.95 RBPF back-end state (legacy fast tier; not the canon-i-cal path):
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 694--695
+[]\OT1/cmr/m/n/10.95 World-static and rigid-attachment per-track pre-dict ([], []):
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 702--703
+[]\OT1/cmr/m/n/10.95 Voxel-containment sub-part sup-pres-sion and label-histogram merge:
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 714--715
+[]\OT1/cmr/m/n/10.95 Translation-only Joseph step on the cen-troid mea-sure-ment (\TS1/cmr/m/n/10.95 §\OT1/cmr/m/n/10.95 II.5):
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 715--716
+[]\OT1/cmr/m/n/10.95 Full-$[](3)$ Joseph form and IEKF in-ner it-er-a-tions (used when ICP suc-ceeds):
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 718--719
+[]\OT1/cmr/m/n/10.95 World-frame pose-and-cov over-write (release-hook prim-i-tive):
  []
 
 [12]
-Overfull \hbox (72.89954pt too wide) in paragraph at lines 739--740
-[]\OT1/cmr/m/n/10.95 Gravity-aware re-lease pre-dict: \OT1/cmtt/m/n/10.95 pose[]update/voxel[]observability.py\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 pose[]update/object[]dynamics.py\OT1/cmr/m/n/10.95 ,
+Underfull \hbox (badness 10000) in paragraph at lines 731--732
+[]\OT1/cmr/m/n/10.95 Self-merge pass (can-di-date enu-mer-a-tion, sort, fuse) and merge-event emis-sion:
  []
 
-[13] (./bernoulli_ekf.aux)
+
+Underfull \hbox (badness 10000) in paragraph at lines 742--743
+[]\OT1/cmr/m/n/10.95 Trigger gate, back-end dis-patch, edge emis-sion, drop-to-keep remap:
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 743--744
+[]\OT1/cmr/m/n/10.95 LLM and REST clients with disk-cached prompts/responses:
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 745--746
+[]\OT1/cmr/m/n/10.95 Held-set clo-sure un-der in/on edges (\TS1/cmr/m/n/10.95 §\OT1/cmr/m/n/10.95 II.10) and trig-ger pred-i-cate:
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 751--752
+[]\OT1/cmr/m/n/10.95 Held-oid se-lec-tion at the grasp edge (containment-fraction rank-ing):
+ []
+
+
+Overfull \hbox (46.87657pt too wide) in paragraph at lines 752--753
+[]\OT1/cmr/m/n/10.95 Phase + held-set wiring into the tracker step: \OT1/cmtt/m/n/10.95 ekf[]tracker/manipulation/gripper[]state[]inferrer.py\OT1/cmr/m/n/10.95 . 
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 753--754
+[]\OT1/cmr/m/n/10.95 Gripper fin-ger ge-om-e-try prim-i-tives shared by FSM and vi-su-al-izer:
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 758--759
+[]\OT1/cmr/m/n/10.95 Voxel ob-serv-abil-ity grid and down-ward ray-cast clas-si-fi-ca-tion:
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 760--761
+[]\OT1/cmr/m/n/10.95 Parametric dis-per-sion model ([]) and landing-pose syn-the-sis:
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 766--767
+[]\OT1/cmr/m/n/10.95 Canonical in-stru-mented fast-tier driver with de-bug cap-ture:
+ []
+
+[13]
+Underfull \hbox (badness 10000) in paragraph at lines 767--768
+[]\OT1/cmr/m/n/10.95 Fast-tier or-ches-tra-tion (per-frame step body, de-bug out-put):
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 771--772
+[]\OT1/cmr/m/n/10.95 Deep camera-pose re-finer used only when ex-plic-itly en-abled:
+ []
+
+
+Overfull \hbox (48.2749pt too wide) in paragraph at lines 778--779
+[]\OT1/cmr/m/n/10.95 Live OWL+SAM2 de-tect $\OMS/cmsy/m/n/10.95 !$ \OT1/cmr/m/n/10.95 EKF step smoke test: \OT1/cmtt/m/n/10.95 tests/integration/test[]detect[]step[]pipeline.py\OT1/cmr/m/n/10.95 . 
+ []
+
+
+Underfull \hbox (badness 10000) in paragraph at lines 779--780
+[]\OT1/cmr/m/n/10.95 Per-API mp4 ren-derer (5 sep-a-rate videos, one per pub-lic method):
+ []
+
+
+Overfull \hbox (63.15213pt too wide) in paragraph at lines 812--814
+[]\OT1/cmtt/m/n/10.95 utils/fetch[]kinematics.py:17 \OT1/cmr/m/n/10.95 cal-i-brates camera-to-base ro-ta-tion against \OT1/cmtt/m/n/10.95 /tf \OT1/cmr/m/n/10.95 from the \OT1/cmtt/m/n/10.95 apple[]in[]the[]tray
+ []
+
+
+Overfull \hbox (9.67938pt too wide) in paragraph at lines 814--816
+[]\OT1/cmtt/m/n/10.95 utils/robot[]models/fetch.py:24, 53 \OT1/cmr/m/n/10.95 pin em-pir-i-cal inside-pts val-i-da-tion to \OT1/cmtt/m/n/10.95 apple[]in[]the[]tray
+ []
+
+[14]
+Overfull \hbox (87.08919pt too wide) in paragraph at lines 824--834
+\OT1/cmtt/m/n/10.95 tests/diagnostics/render[]api[]videos.py:441-442\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 tests/integration/test[]detect[]step[]pipeline.py:106\OT1/cmr/m/n/10.95 ).
+ []
+
+
+Overfull \hbox (26.91173pt too wide) in paragraph at lines 835--845
+[]\OT1/cmr/m/n/10.95 Single-frame re-gres-sion arte-facts are also per-va-sive: \OT1/cmtt/m/n/10.95 FRAME[]IDX = 399 \OT1/cmr/m/n/10.95 hard-coded for ap-ple[]in[]the[]tray
+ []
+
+
+Overfull \hbox (89.7379pt too wide) in paragraph at lines 835--845
+\OT1/cmr/m/n/10.95 (\OT1/cmtt/m/n/10.95 tests/diagnostics/dump[]llm[]relation[]io.py:34\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 tests/diagnostics/visualize[]llm[]relation[]frame.py:29\OT1/cmr/m/n/10.95 ),
+ []
+
+
+Overfull \hbox (12.44412pt too wide) in paragraph at lines 848--861
+\OT1/cmtt/m/n/10.95 utils/gripper[]state.py\OT1/cmr/m/n/10.95 , re-la-tion pe-riod $90$ frames in \OT1/cmtt/m/n/10.95 ekf[]tracker/relations/relation[]utils.py
+ []
+
+
+Overfull \hbox (0.91524pt too wide) in paragraph at lines 884--892
+\OT1/cmr/m/n/10.95 at \OT1/cmtt/m/n/10.95 scripts/visualize[]ekf[]tracking.py:2045-2068 \OT1/cmr/m/n/10.95 over-rides to soft mode with $\OML/cmm/m/it/10.95 ^^L[]\OT1/cmr/m/n/10.95 6\OML/cmm/m/it/10.95 :\OT1/cmr/m/n/10.95 0$, $\OML/cmm/m/it/10.95 ^^M[]\OT1/cmr/m/n/10.95 2\OML/cmm/m/it/10.95 :\OT1/cmr/m/n/10.95 0$,
+ []
+
+[15]
+Overfull \hbox (5.4121pt too wide) in paragraph at lines 901--905
+[]\OT1/cmr/bx/n/10.95 Held-set clo-sure capped at 8 it-er-a-tions \OT1/cmr/m/n/10.95 (\OT1/cmtt/m/n/10.95 ekf[]tracker/relations/relation[]utils.py:30\OT1/cmr/m/n/10.95 ).
+ []
+
+
+Overfull \hbox (36.0214pt too wide) in paragraph at lines 917--920
+[]\OT1/cmr/bx/n/10.95 Workspace AABB fixed at $\OT1/cmr/m/n/10.95 5 \OMS/cmsy/m/n/10.95 ^^B \OT1/cmr/m/n/10.95 5 \OMS/cmsy/m/n/10.95 ^^B \OT1/cmr/m/n/10.95 3$ \OT1/cmr/bx/n/10.95 m at 5 cm voxel size \OT1/cmr/m/n/10.95 (\OT1/cmtt/m/n/10.95 perception/voxel[]observability.py\OT1/cmr/m/n/10.95 ).
+ []
+
+
+Overfull \hbox (0.59pt too wide) in paragraph at lines 933--939
+[]\OT1/cmtt/m/n/10.95 ekf[]tracker/config.py:104 \OT1/cmr/m/n/10.95 sets $\OML/cmm/m/it/10.95 r[] \OT1/cmr/m/n/10.95 = 0\OML/cmm/m/it/10.95 :\OT1/cmr/m/n/10.95 5$ while \OT1/cmtt/m/n/10.95 ekf[]tracker/config.py:52 \OT1/cmr/m/n/10.95 sets $\OML/cmm/m/it/10.95 r[] \OT1/cmr/m/n/10.95 =
+ []
+
+[16]
+Overfull \hbox (12.35242pt too wide) in paragraph at lines 985--991
+[]\OT1/cmtt/m/n/10.95 LABEL[]DYNAMICS[]TABLE \OT1/cmr/m/n/10.95 cov-ers six fruit-and-container la-bels (\OT1/cmtt/m/n/10.95 utils/object[]dynamics.py:69-76\OT1/cmr/m/n/10.95 ).
+ []
+
+[17]
+Overfull \hbox (2.7424pt too wide) in paragraph at lines 1038--1050
+\OT1/cmr/m/n/10.95 ter-face in \OT1/cmtt/m/n/10.95 utils/base[]pose[]backend.py \OT1/cmr/m/n/10.95 there-fore du-pli-cates ev-ery prim-i-tive (\OT1/cmtt/m/n/10.95 update[]observation\OT1/cmr/m/n/10.95 ,
+ []
+
+
+Overfull \hbox (78.71454pt too wide) in paragraph at lines 1038--1050
+\OT1/cmr/m/n/10.95 no pro-duc-tion path con-sumes. \OT1/cmr/bx/n/10.95 Fix: \OT1/cmr/m/n/10.95 delete \OT1/cmtt/m/n/10.95 ekf[]tracker/state/rbpf[]state.py \OT1/cmr/m/n/10.95 and \OT1/cmtt/m/n/10.95 utils/base[]pose[]backend.py\OT1/cmr/m/n/10.95 ;
+ []
+
+LaTeX Font Info:    Font shape `OT1/cmtt/bx/n' in size <10.95> not available
+(Font)              Font shape `OT1/cmtt/m/n' tried instead on input line 1052.
+
+Overfull \hbox (145.73038pt too wide) in paragraph at lines 1052--1057
+\OT1/cmr/m/n/10.95 one-line wrap-per that for-wards its ar-gu-ments un-changed to \OT1/cmtt/m/n/10.95 predict[]static \OT1/cmr/m/n/10.95 (\OT1/cmtt/m/n/10.95 ekf[]tracker/state/gaussian[]state.py:703-720\OT1/cmr/m/n/10.95 ).
+ []
+
+
+Overfull \hbox (18.09775pt too wide) in paragraph at lines 1061--1064
+ []\OT1/cmr/bx/n/10.95 World-static mo-tion ($\OML/cmm/m/it/10.95 ^^V[] \OT1/cmr/m/n/10.95 = \OML/cmm/m/it/10.95 u[]^^V[]$\OT1/cmr/bx/n/10.95 ).[] Prin-ci-pled. \OT1/cmr/m/n/10.95 Di-rect al-ge-braic con-se-quence of $\OML/cmm/m/it/10.95 T[]^^V[] \OT1/cmr/m/n/10.95 =
+ []
+
+
+Overfull \hbox (20.93979pt too wide) in paragraph at lines 1070--1075
+ []\OT1/cmr/bx/n/10.95 Adjoint co-vari-ance trans-port.[] Ref-er-ence. \OT1/cmr/m/n/10.95 Bour-maud, M^^Segret, Ar-naudon, Gire-mus, ``Continuous-
+ []
+
+[18]
+Overfull \hbox (1.65411pt too wide) in paragraph at lines 1145--1153
+ []\OT1/cmr/bx/n/10.95 SAM2 con-ti-nu-ity bonus $\OML/cmm/m/it/10.95  \OT1/cmr/m/n/10.95 = 4\OML/cmm/m/it/10.95 :\OT1/cmr/m/n/10.95 4$\OT1/cmr/bx/n/10.95 .[] []RE-DUN-DANT.[] \OT1/cmr/m/n/10.95 The mech-a-nism (cost dis-count for matched
+ []
+
+[19] [20]
+Overfull \hbox (4.5687pt too wide) in paragraph at lines 1237--1244
+ []\OT1/cmr/bx/n/10.95 Dual up-date prim-i-tives (\OT1/cmtt/m/n/10.95 update[]observation \OT1/cmr/bx/n/10.95 vs \OT1/cmtt/m/n/10.95 update[]observation[]centroid\OT1/cmr/bx/n/10.95 ).[] []RE-DUN-
+ []
+
+
+Overfull \hbox (0.7637pt too wide) in paragraph at lines 1260--1267
+ []\OT1/cmr/bx/n/10.95 Confirm-$\OML/cmm/m/it/10.95 k$\OT1/cmr/bx/n/10.95 =$\OT1/cmr/m/n/10.95 3$\OT1/cmr/bx/n/10.95 , score-floor=$\OT1/cmr/m/n/10.95 0\OML/cmm/m/it/10.95 :\OT1/cmr/m/n/10.95 20$\OT1/cmr/bx/n/10.95 , border-margin=$\OT1/cmr/m/n/10.95 2$\OT1/cmr/bx/n/10.95 px, TTL=$\OT1/cmr/m/n/10.95 30$\OT1/cmr/bx/n/10.95 frames, near-live=$\OT1/cmr/m/n/10.95 0\OML/cmm/m/it/10.95 :\OT1/cmr/m/n/10.95 05$\OT1/cmr/bx/n/10.95 m.[]
+ []
+
+[21] [22]
+
+LaTeX Font Warning: Font shape `OT1/cmr/bx/sc' undefined
+(Font)              using `OT1/cmr/bx/n' instead on input line 1413.
+
+
+Overfull \hbox (4.46394pt too wide) in paragraph at lines 1413--1421
+ []\OT1/cmr/bx/sc/10.95 One-shot release-trigger (Releasing$\OMS/cmsy/m/n/10.95 !$\OT1/cmr/bx/sc/10.95 Idle, over-write EKF state once).[] []RE-DUN-DANT.[]
+ []
+
+[23]
+Overfull \hbox (75.90797pt too wide) in paragraph at lines 1455--1460
+ []\OT1/cmtt/m/n/10.95 perception/camera[]pose[]refiner.py \OT1/cmr/bx/sc/10.95 (337 LoC).[] []RE-DUN-DANT.[] \OT1/cmr/m/n/10.95 Im-ported only by \OT1/cmtt/m/n/10.95 scripts/data[]demo.py
+ []
+
+
+Overfull \hbox (2.1316pt too wide) in paragraph at lines 1469--1473
+ []\OT1/cmtt/m/n/10.95 ekf[]tracker/manipulation/gripper[]state[]inferrer.py \OT1/cmr/bx/sc/10.95 ($\OT1/cmr/m/n/10.95 45$\OT1/cmr/bx/sc/10.95 -line shim).[] Prin-ci-pled. \OT1/cmr/m/n/10.95 Driver-
+ []
+
+
+Overfull \hbox (39.67282pt too wide) in paragraph at lines 1492--1497
+[]\OT1/cmr/bx/sc/10.95 Update over-lap (V.4--V.5): \OT1/cmr/m/n/10.95 four over-lap-ping ad-mis-sion gates (\OT1/cmtt/m/n/10.95 max[]residual[]m\OT1/cmr/m/n/10.95 , \OT1/cmtt/m/n/10.95 held[]meas[]radius[]m\OT1/cmr/m/n/10.95 ,
+ []
+
+[24] [25] (./bernoulli_ekf.aux)
  ***********
 LaTeX2e <2025-11-01>
 L3 programming layer <2026-01-19>
@@ -567,18 +710,18 @@ Package rerunfilecheck Info: File `bernoulli_ekf.out' has not changed.
 (rerunfilecheck)             Checksum: D41D8CD98F00B204E9800998ECF8427E;0.
  ) 
 Here is how much of TeX's memory you used:
- 12155 strings out of 467525
- 186480 string characters out of 5418982
- 619945 words of memory out of 5000000
- 40816 multiletter control sequences out of 15000+600000
- 645105 words of font info for 104 fonts, out of 8000000 for 9000
+ 12735 strings out of 467525
+ 194316 string characters out of 5418982
+ 628332 words of memory out of 5000000
+ 41277 multiletter control sequences out of 15000+600000
+ 644769 words of font info for 102 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
- 75i,12n,79p,619b,588s stack positions out of 10000i,1000n,20000p,200000b,200000s
-</usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx12.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmcsc10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmex10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi6.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi8.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmib10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr17.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr8.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr9.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy8.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmti10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmtt10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/euler/eufm10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/symbols/msbm10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/cm-super/sfrm1095.pfb>
-Output written on bernoulli_ekf.pdf (13 pages, 300343 bytes).
+ 75i,12n,79p,631b,605s stack positions out of 10000i,1000n,20000p,200000b,200000s
+</usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx12.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmbx8.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmcsc10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmex10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi6.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi8.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmmib10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr17.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr8.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmr9.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy8.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmti10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/cm/cmtt10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/euler/eufm10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/amsfonts/symbols/msbm10.pfb></usr/local/texlive/2026/texmf-dist/fonts/type1/public/cm-super/sfrm1095.pfb>
+Output written on bernoulli_ekf.pdf (25 pages, 361784 bytes).
 PDF statistics:
- 263 PDF objects out of 1000 (max. 8388607)
- 207 compressed objects within 3 object streams
- 82 named destinations out of 1000 (max. 500000)
+ 459 PDF objects out of 1000 (max. 8388607)
+ 388 compressed objects within 4 object streams
+ 193 named destinations out of 1000 (max. 500000)
  1 words of extra memory for PDF output out of 10000 (max. 10000000)
 

@@ -59,8 +59,11 @@ def _make_det():
                 def count_inside(self, pts): return 0
                 def corners(self): return np.zeros((8, 3))
             return _Box()
-    return GraspOwnerDetector(gripper=_DummyGripper(),
-                               fallback_radius_m=0.05)
+    return GraspOwnerDetector(
+        gripper=_DummyGripper(),
+        min_inside_count=20,
+        fallback_radius_m=0.05,
+        perception_keys=("grasp_owner_pid", "is_grasped"))
 
 
 # ─── Tier 3: nearest-point + 5 cm ──────────────────────────────────
@@ -141,7 +144,11 @@ def test_tier3_default_radius_is_5cm():
             class _B:
                 def count_inside(self, p): return 0
             return _B()
-    d = GraspOwnerDetector(gripper=_G())
+    d = GraspOwnerDetector(
+        gripper=_G(),
+        min_inside_count=20,
+        fallback_radius_m=0.05,
+        perception_keys=("grasp_owner_pid", "is_grasped"))
     assert d.fallback_radius_m == 0.05
 
 
@@ -202,7 +209,11 @@ def test_tier2_invariant_under_T_wb():
     det_in = [{"id": 42, "label": "apple",
                 "mask": mask}]
 
-    detector = GraspOwnerDetector(gripper=gripper, min_inside_count=1)
+    detector = GraspOwnerDetector(
+        gripper=gripper,
+        min_inside_count=1,
+        fallback_radius_m=0.05,
+        perception_keys=("grasp_owner_pid", "is_grasped"))
 
     # Two arbitrary T_wb's — they should not affect the count_inside
     # because the cam→gripper transform doesn't depend on T_wb.

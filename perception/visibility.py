@@ -83,13 +83,13 @@ def visibility_p_v(
     depth: np.ndarray,
     image_shape: Tuple[int, int],
     *,
-    max_samples_per_track: int = 256,
-    fallback_sphere_samples: int = 64,
-    fallback_obj_radius: float = 0.05,
-    z_tol_abs: float = 0.02,
-    z_tol_rel: float = 0.02,
-    min_depth: float = 0.1,
-    max_depth: float = 10.0,
+    max_samples_per_track: int,
+    fallback_sphere_samples: int,
+    fallback_obj_radius: float,
+    z_tol_abs: float,
+    z_tol_rel: float,
+    min_depth: float,
+    max_depth: float,
 ) -> Dict[int, float]:
     """Compute `p_v[oid]` for every track via depth ray-tracing.
 

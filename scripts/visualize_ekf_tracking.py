@@ -98,16 +98,9 @@ K_DEFAULT = np.array([
 # call sites (Hungarian d², matched-update innovation diagnostics,
 # the actual EKF update); same value everywhere keeps gate / cost /
 # update consistent.
-_CENTROID_R_CAM_STD_M = 0.02
-_R_CENT_CAM_3D = np.diag([_CENTROID_R_CAM_STD_M ** 2] * 3)
-# Rotation-decoupling: centroid measurement carries no rotation info,
-# so the 6D-shaped innovation pads the rotation block with ∞ so it
-# falls out of every solve.
-_ROTATION_DECOUPLE_VAR = 1e6
-
-# Per-frame slack covariance for the rigid-attachment predict (grip
-# slip / deformation). Tiny on top of Ad·P·Adᵀ.
-_Q_MANIP_SLACK = np.diag([1e-6] * 3 + [1e-6] * 3)
+# Module-level fast-tier noise constants removed --- the values now
+# live in ``ekf_tracker/configs/default.yaml`` (``fast_tier_noise:``)
+# and are exposed on the tracker instance as ``self._fast_tier_noise``.
 
 # palette matches visualize_sam2_observations for inter-viz consistency
 _PALETTE_RGB = [
@@ -1960,6 +1953,9 @@ def main():
                     help="skip composing the per-frame PNGs into an MP4")
     ap.add_argument("--fps", type=float, default=10.0,
                     help="frame rate for the composed MP4 (default 10)")
+    ap.add_argument("--config-path", dest="config_path", default=None,
+                    help="path to a customization YAML (defaults to "
+                         "ekf_tracker/configs/default.yaml)")
     args = ap.parse_args()
 
     traj = args.trajectory
@@ -2022,85 +2018,61 @@ def main():
         joints_map = {int(k): v for k, v in raw.items()}
 
     # Construct the robot-agnostic grasp-owner detector.
-    gripper_geom = create_gripper_geometry(robot_type="fetch")
-    grasp_detector = GraspOwnerDetector(gripper=gripper_geom)
-    print(f"[grasp] {gripper_geom.describe()}")
-    grip_inferrer = _GripperStateInferrer(detector=grasp_detector)
+    # ── load config (must precede gripper / grasp / voxel construction) ──
+    from ekf_tracker.configs import (
+        load_config, to_bernoulli_config,
+        build_voxel_observability_kwargs,
+        build_voxel_integrate_kwargs,
+        build_grasp_owner_detector_kwargs,
+        build_gripper_phase_tracker_kwargs,
+        build_gravity_predict_kwargs,
+        build_held_set_expansion_kwargs,
+        build_object_dynamics_table,
+    )
+    config_path = getattr(args, "config_path", None)
+    ekf_cfg = load_config(config_path)
+    _voxel_integrate_kwargs = build_voxel_integrate_kwargs(ekf_cfg)
+    _gravity_predict_kwargs = build_gravity_predict_kwargs(ekf_cfg)
+    _held_set_expansion_kwargs = build_held_set_expansion_kwargs(ekf_cfg)
+    _dyn_default, _dyn_table, _dyn_footprint = build_object_dynamics_table(ekf_cfg)
 
-    # Construct the relation pipeline (LLM by default; opt out with
-    # env var EKF_VIZ_RELATION_BACKEND=none for fast / offline runs).
-    # The cache lives per-trajectory so re-runs on the same dataset
-    # replay LLM responses from disk for free.
-    relation_backend = os.environ.get("EKF_VIZ_RELATION_BACKEND", "llm")
-    relation_cache_dir = os.environ.get(
-        "EKF_VIZ_RELATION_CACHE_DIR",
-        os.path.join(viz_root, "relation_cache"))
-    relation_pipeline = _RelationPipeline(backend=relation_backend,
-                                            cache_dir=relation_cache_dir)
-    print(f"[relation] backend={relation_backend}  "
+    gripper_geom = create_gripper_geometry(robot_type="fetch")
+    grasp_detector = GraspOwnerDetector(
+        gripper=gripper_geom,
+        **build_grasp_owner_detector_kwargs(ekf_cfg))
+    print(f"[grasp] {gripper_geom.describe()}")
+    grip_inferrer = _GripperStateInferrer(
+        detector=grasp_detector,
+        **build_gripper_phase_tracker_kwargs(ekf_cfg))
+
+    # Construct the relation pipeline. All kwargs come from the YAML;
+    # cache_dir is per-trajectory so it stays a runtime value.
+    from ekf_tracker.configs import build_relation_orchestrator_kwargs
+    relation_cache_dir = os.path.join(viz_root, "relation_cache")
+    relation_pipeline = _RelationPipeline(
+        cache_dir=relation_cache_dir,
+        **build_relation_orchestrator_kwargs(ekf_cfg),
+    )
+    print(f"[relation] backend={relation_pipeline.backend}  "
           f"trigger=on_grasp/on_release/on_new_object + every "
           f"{relation_pipeline._cfg.relation_every_n_frames} frames")
 
     # ── tracker setup ──
-    cfg = BernoulliConfig(
-        association_mode="hungarian",
-        p_s=1.0,
-        p_d=0.9,
-        alpha=4.4,
-        lambda_c=1.0,
-        lambda_b=1.0,
-        r_conf=0.5,
-        r_min=1e-3,
-        G_in=12.59,
-        G_out=25.0,
-        P_max=np.diag([0.25**2] * 3 + [(np.pi / 4) ** 2] * 3),
-        enable_visibility=True,
-        enable_huber=True,
-        init_cov_from_R=False,        # fixed 5 cm / 0.05 rad at birth (vs ICP's R)
-        # Perception-style soft cost on labels + score (mirrors
-        # rosbag2dataset/sam2/sam2_client._pair_cost). The hard label
-        # gate is OFF; a noisy label disagreement adds 6.0 chi^2_6 units
-        # to the cost (less than the outer gate, so a geometrically
-        # excellent pair can still match) and a per-detection score
-        # bias of 2.0*(1-score) mildly disfavours low-confidence dets.
-        enforce_label_match=False,
-        hungarian_label_penalty=6.0,
-        hungarian_score_weight=2.0,
-        # Translation-only outer gate: per-oid ICP rotation chains
-        # drift independently and can lift d^2_rot above the chi^2_6
-        # gate even at sub-mm translation match (frame-485 case:
-        # d^2_trans=0.02, d^2_rot=112). Trans-only gate at chi^2_3
-        # 0.9997 = 21.108 fixes that. Cost still uses 'sum' so a
-        # rotation match gets a tie-break.
-        gate_mode="trans",
-        G_out_trans=21.108,
-        cost_d2_mode="sum",
-        # Floor P_bo per axis -- prevents the EKF posterior from
-        # shrinking below realistic per-frame perception jitter
-        # (5 mm trans / 0.05 rad rot). Without this, a track with
-        # 10k+ observations rejects 2-3 cm jitter on the next frame
-        # via the chi^2_3 gate (frame-430 case).
-        P_min_diag=np.array([0.005**2] * 3 + [0.05**2] * 3),
-        # Track-to-track self-merge after each step: catches duplicate
-        # tracks of the same physical object that survived a one-to-one
-        # Hungarian round (e.g. SAM2 ids splitting). Euclidean gate in
-        # metres — ≈ one object radius for apples / cups / cans. Does NOT
-        # scale with covariance, so two fresh births can't collapse just
-        # because σ starts at 5 cm.
-        self_merge_trans_m=0.05,
-        K=K_DEFAULT,
-        image_shape=(480, 640),
+    from ekf_tracker.configs import (
+        build_visibility_kwargs, build_det_dedup_kwargs,
+        build_process_noise_schedule, build_fast_tier_noise_config,
     )
-    tracker = GaussianEkfTracker(K_DEFAULT, cfg, pose_method=args.pose_method)
+    cfg = to_bernoulli_config(ekf_cfg, K=K_DEFAULT, image_shape=(480, 640))
+    tracker = GaussianEkfTracker(
+        K_DEFAULT, cfg, pose_method=args.pose_method,
+        visibility_kwargs=build_visibility_kwargs(ekf_cfg),
+        det_dedup_kwargs=build_det_dedup_kwargs(ekf_cfg),
+        process_noise_schedule=build_process_noise_schedule(ekf_cfg),
+        fast_tier_noise=build_fast_tier_noise_config(ekf_cfg),
+    )
 
     # ── voxel observability (for gravity-aware predict at release) ──
-    # Coarse 5 cm grid covering 5 m × 5 m × 3 m around origin; sufficient
-    # for the apple_drop / apple_in_the_tray / apple_to_cabinate scenes.
-    voxel_obs = VoxelObservability(
-        voxel_size_m=0.05,
-        workspace_aabb=((-2.5, -2.5, -1.0), (2.5, 2.5, 2.0)),
-        n_min_hit=2, n_min_pass=3,
-    )
+    voxel_obs = VoxelObservability(**build_voxel_observability_kwargs(ekf_cfg))
     # Phase-transition tracking for the gravity-predict hook.
     prev_phase = "idle"
     prev_held: Optional[int] = None
@@ -2135,8 +2107,7 @@ def main():
                 depth=depth.astype(np.float32),
                 K=K_DEFAULT,
                 T_cw=np.asarray(T_wb, dtype=np.float64) @ np.asarray(T_bc_for_vox, dtype=np.float64),
-                max_range_m=3.0,
-                subsample=4,
+                **_voxel_integrate_kwargs,
             )
         except Exception as e:
             print(f"[WARN] voxel_obs.integrate_depth failed at fr {idx}: {e}")
@@ -2203,7 +2174,8 @@ def main():
 
         # Expand held_oids using the latest filtered relation graph.
         held_oids = expand_held_with_relations(
-            held_seed, relation_pipeline.edges)
+            held_seed, relation_pipeline.edges,
+            **_held_set_expansion_kwargs)
         # Drop any oids the tracker doesn't actually have (relation
         # graph might still reference a pruned/merged track).
         held_oids = {o for o in held_oids if o in tracker.state.objects}
@@ -2233,15 +2205,19 @@ def main():
         # supporting surface; the parametric model in
         # ekf_tracker.manipulation.gravity_predict handles bounce/roll dispersion.
         cur_phase = gripper_state.get("phase", "idle")
-        if (prev_phase in ("holding", "releasing")
-                and cur_phase not in ("holding", "releasing")
+        # Fire gravity-predict at the holding→{releasing,idle} edge --- the
+        # FRAME the gripper opens --- not at releasing→idle. See
+        # ekf_tracker/api.py for rationale.
+        if (prev_phase == "holding"
+                and cur_phase in ("releasing", "idle")
                 and prev_held is not None
                 and prev_held in tracker.state.objects):
             try:
                 pe_w = tracker.state.collapsed_object_world(int(prev_held))
                 if pe_w is not None:
                     label = tracker.object_labels.get(int(prev_held))
-                    dyn = lookup_dynamics(label)
+                    dyn = lookup_dynamics(
+                        label, default=_dyn_default, table=_dyn_table)
                     # Live-object overlay: every other live oid contributes.
                     other_voxels = []
                     for other_oid, other_pe in (
@@ -2250,7 +2226,8 @@ def main():
                             continue
                         T_o = other_pe.T
                         other_dyn = lookup_dynamics(
-                            tracker.object_labels.get(int(other_oid)))
+                            tracker.object_labels.get(int(other_oid)),
+                            default=_dyn_default, table=_dyn_table)
                         other_voxels.append((
                             float(T_o[0, 3]), float(T_o[1, 3]),
                             float(T_o[2, 3]), float(other_dyn.radius_m)))
@@ -2259,8 +2236,9 @@ def main():
                         P_release=pe_w.cov,
                         voxel_obs=voxel_obs,
                         dyn=dyn,
-                        workspace_floor_z=-1.0,
+                        shape_footprint_factors=_dyn_footprint,
                         live_object_voxels=other_voxels,
+                        **_gravity_predict_kwargs,
                     )
                     # Write back into base-frame state. The EKF stores
                     # objects in base frame; convert T_land back via T_wb.

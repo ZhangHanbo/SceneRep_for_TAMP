@@ -59,14 +59,15 @@ class GripperPhaseTracker:
 
     def __init__(
         self,
-        closed_width_m: float = 0.025,
-        open_width_m: float = 0.040,
-        close_delta_m: float = 0.005,
-        grasp_radius_m: float = 0.30,
-        history_size: int = 5,
-        motion_threshold_m: float = 0.01,
-        min_transition_frames: int = 5,
-        min_inside_count: int = 20,
+        *,
+        closed_width_m: float,
+        open_width_m: float,
+        close_delta_m: float,
+        grasp_radius_m: float,
+        history_size: int,
+        motion_threshold_m: float,
+        min_transition_frames: int,
+        min_inside_count: int,
         detector: Optional[GraspOwnerDetector] = None,
     ):
         self.closed_width = float(closed_width_m)

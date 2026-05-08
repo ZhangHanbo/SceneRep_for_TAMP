@@ -1,0 +1,356 @@
+# =============================================================================
+# ekf_tracker/configs/default.yaml
+#
+# Single source of truth for every parameter the EKF tracker pipeline
+# consumes. Mirrors the in-code production defaults bit-exactly:
+#
+#   - bernoulli:           BernoulliConfig (production overrides from
+#                          ekf_tracker/api.py::_default_bernoulli_cfg)
+#   - trigger:             TriggerConfig (EkfTracker's never-fires default
+#                          at ekf_tracker/api.py:151-153)
+#   - ekf_tracker:         EkfTracker.__init__ kwargs that previously had
+#                          defaults
+#   - process_noise:       utils/ekf_se3.py module constants + thresholds
+#   - fast_tier_noise:     ekf_tracker/gaussian_ekf_tracker.py +
+#                          ekf_tracker/orchestrator_gaussian.py module
+#                          constants
+#   - pose_estimator:      perception/icp_pose.py PoseEstimator class
+#                          attributes + _clean_mask defaults
+#   - perception:          per-call defaults of visibility_p_v and
+#                          voxelize_mask
+#   - voxel_observability: VoxelObservability.__init__ defaults +
+#                          integrate_depth defaults
+#   - gripper_phase:       utils/gripper_state.py GripperPhaseTracker
+#                          __init__ defaults
+#   - grasp_owner:         ekf_tracker/manipulation/grasp_owner_detector.py
+#                          GraspOwnerDetector __init__ defaults
+#   - gravity_predict:     predict_landing_pose kwarg defaults
+#   - object_dynamics:     utils/object_dynamics.py LABEL_DYNAMICS_TABLE,
+#                          DEFAULT_DYNAMICS, SHAPE_FOOTPRINT_FACTOR
+#   - relation:            RelationOrchestrator + RelationFilter +
+#                          RelationTriggerConfig + RelationFilter prune
+#                          threshold + held-set closure cap
+#
+# Loading:
+#     from ekf_tracker.configs import load_config, to_bernoulli_config
+#     cfg  = load_config()
+#     bcfg = to_bernoulli_config(cfg, K=K, image_shape=(480, 640))
+#
+# Inheritance: any YAML may include `_extends: <path>` to inherit from
+# another YAML; child values overlay parent values via deep merge.
+#
+# Two-hierarchy contract: this file (the default) and
+# `configs/ekf_tracker/customization.yaml` (the user override) are the
+# ONLY config files. No env-var overrides, no test-fixture YAMLs, no
+# constructor `= 0.5`-style defaults. Missing keys hard-error at load
+# time.
+#
+# IMPORTANT: values below match the in-code defaults exactly. Do NOT
+# edit this file to tune --- create / edit
+# `configs/ekf_tracker/customization.yaml` instead.
+# =============================================================================
+
+# ─────────────────────────────────────────────────────────────────────
+# Bernoulli existence model + EKF gates / weights
+# (mirrors ekf_tracker/api.py::_default_bernoulli_cfg)
+# ─────────────────────────────────────────────────────────────────────
+bernoulli:
+  association_mode: hungarian
+  p_s: 1.0
+  p_d: 0.9
+  alpha: 4.4
+  lambda_c: 1.0
+  lambda_b: 1.0
+  r_min: 1.0e-3
+
+  G_in:  12.59
+  G_out: 25.0
+  G_in_trans:  7.815
+  G_out_trans: 21.108
+  G_out_rot:   21.108
+  gate_mode:    trans
+  cost_d2_mode: sum
+  max_residual_m: 0.30
+
+  # P_max is a 6-vector lifted to a (6,6) np.diag.
+  # Production: trans 0.25 m std, rot pi/4 rad std.
+  P_max: [0.0625, 0.0625, 0.0625, 0.6168502750680849, 0.6168502750680849, 0.6168502750680849]
+  # P_min_diag rotation entries written as 0.0025000000000000005 (not
+  # 2.5e-3) so they match `0.05**2` bit-exactly.
+  P_min_diag: [2.5e-5, 2.5e-5, 2.5e-5, 0.0025000000000000005, 0.0025000000000000005, 0.0025000000000000005]
+
+  enable_huber:        true
+  init_cov_from_R:     false
+  enforce_label_match: false
+
+  hungarian_label_penalty: 6.0
+  hungarian_score_weight:  2.0
+
+  dedup_voxel_size_m:        0.02
+  dedup_containment_thresh:  0.8
+  dedup_require_same_label:  false
+
+  birth_border_margin_px:   2
+  birth_confirm_k:          3
+  birth_score_min:          0.20
+  birth_fitness_min:        0.5
+  birth_rmse_max:           0.02
+  birth_pending_ttl_frames: 30
+  birth_min_dist_m:         0.05
+
+  held_birth_radius_m:        0.25
+  held_meas_radius_m:         0.25
+  held_meas_innov_max_m:      0.20
+  r_held_floor:               0.5
+
+  self_merge_trans_m:   0.05
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Slow-tier scheduler (TriggerConfig).
+# Mirrors ekf_tracker/api.py:151-153 EkfTracker's implicit default
+# (a never-fires scheduler).
+# ─────────────────────────────────────────────────────────────────────
+trigger:
+  on_grasp:                false
+  on_release:              false
+  on_new_object:           false
+  periodic_every_n_frames: -1
+
+
+# ─────────────────────────────────────────────────────────────────────
+# EkfTracker.__init__ knobs that were defaults
+# ─────────────────────────────────────────────────────────────────────
+ekf_tracker:
+  robot_type:          fetch         # api.py:128 default
+  pose_method:         icp_chain     # api.py:132 default; matches
+                                     # GaussianEkfTracker.__init__:103
+  image_shape: [480, 640]            # api.py:137 default
+  default_owl_server:  null          # caller supplies (env / runtime)
+  default_sam2_server: null          # caller supplies (env / runtime)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Process-noise schedule (utils/ekf_se3.py module constants + thresholds)
+# Each *_diag is a 6-element vector; the loader applies np.diag to it.
+# ─────────────────────────────────────────────────────────────────────
+process_noise:
+  Q_static_stable_diag:      [1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8, 1.0e-8]
+  Q_static_unstable_diag:    [1.0e-5, 1.0e-5, 1.0e-5, 1.0e-5, 1.0e-5, 1.0e-5]
+  Q_idle_diag:               [1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6]
+  Q_just_released_diag:      [1.0e-3, 1.0e-3, 1.0e-3, 1.0e-3, 1.0e-3, 1.0e-3]
+  # _Q_GRASPING_RELEASING = diag([0.02**2]*3 + [0.10**2]*3) — encode
+  # the bit-exact squared values: 0.02**2 = 0.0004 (exact in float64);
+  # 0.10**2 = 0.010000000000000002 (one ULP above 0.01).
+  Q_grasping_releasing_diag: [0.0004, 0.0004, 0.0004, 0.010000000000000002, 0.010000000000000002, 0.010000000000000002]
+  # _Q_HOLDING_BASE_FRAME = diag([2.5e-4]*3 + [1e-3]*3)
+  Q_holding_base_frame_diag: [2.5e-4, 2.5e-4, 2.5e-4, 1.0e-3, 1.0e-3, 1.0e-3]
+  Q_held_world_frame_diag:   [1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4, 1.0e-4]
+  frames_unstable_threshold: 5    # process_noise_for_phase line 398
+  frames_stable_threshold:   50   # process_noise_for_phase line 400
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Fast-tier internal noise model
+# (post-Phase-D8/D9 dead consts `_ROTATION_DECOUPLE_VAR` and
+# `_Q_MANIP_SLACK` removed; only the live `_R_CENT_CAM_3D` and
+# `_TINY_COV` constants are retained as YAML knobs.)
+# ─────────────────────────────────────────────────────────────────────
+fast_tier_noise:
+  centroid_r_cam_std_m: 0.02
+  tiny_cov_diag: [1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6, 1.0e-6]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# PoseEstimator (perception/icp_pose.py:258-288) class attributes +
+# _clean_mask + _back_project defaults
+# ─────────────────────────────────────────────────────────────────────
+pose_estimator:
+  voxel_size_m:           0.005
+  icp_threshold_m:        0.020
+  icp_max_iter:           30
+  min_fitness:            0.90
+  max_rmse:               0.015
+  trans_var_floor:        4.0e-4
+  rot_var_floor:          1.0e-2
+  centroid_r_diag: [1.0e-4, 1.0e-4, 1.0e-4, 1.0e-3, 1.0e-3, 1.0e-3]
+  ref_update_min_fitness: 0.95
+  max_ref_points:         4000
+  mask_clean:
+    erosion_iter:        2
+    depth_edge_max_jump: 0.02
+    min_depth:           0.1
+    max_depth:           5.0
+    min_points:          30
+  back_project:
+    min_depth:  0.1
+    max_depth:  5.0
+    min_points: 30
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Per-call perception kwargs
+# ─────────────────────────────────────────────────────────────────────
+perception:
+  visibility:
+    max_samples_per_track:    256
+    fallback_sphere_samples:   64
+    fallback_obj_radius:        0.05
+    z_tol_abs:                  0.02
+    z_tol_rel:                  0.02
+    min_depth:                  0.1
+    max_depth:                 10.0
+  det_dedup:
+    voxel_size: 0.02
+    min_depth:  0.1
+    max_depth:  5.0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Voxel observability grid (perception/voxel_observability.py:85+)
+# NB: voxel_size_m=0.05 here matches the production call site
+# (api.py:170 + scripts/visualize_ekf_tracking.py:2099). The class
+# default 0.02 in voxel_observability.py:87 is overridden everywhere.
+# ─────────────────────────────────────────────────────────────────────
+voxel_observability:
+  voxel_size_m: 0.05
+  workspace_aabb:
+    min: [-2.5, -2.5, -1.0]
+    max: [ 2.5,  2.5,  2.0]
+  n_min_hit:  2
+  n_min_pass: 3
+  integrate:
+    max_range_m: 3.0
+    subsample:   4
+    min_depth_m: 0.05
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Gripper phase FSM (utils/gripper_state.py:60+)
+# ─────────────────────────────────────────────────────────────────────
+gripper_phase:
+  closed_width_m:        0.025
+  open_width_m:          0.040
+  # close_delta_m: rolling-baseline deadband for the "any closing →
+  # grasp" rule. Was 5 mm — too tight for the apple_drop release: the
+  # gripper opening from 0.0622 → 0.0806 → 0.10002 m had to fully
+  # cross 0.0955 m before "just_opened" fired, which delayed the
+  # release transition by a frame. 25 mm puts the threshold at
+  # baseline − 0.025 ≈ 0.0755 m, so the first opening sample (0.0806)
+  # already clears the threshold and the FSM reports release on the
+  # FRAME the gripper actually starts to open.
+  close_delta_m:         0.025
+  grasp_radius_m:        0.30
+  history_size:          5
+  motion_threshold_m:    0.01
+  min_transition_frames: 5
+  min_inside_count:      20
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Grasp-owner detector (ekf_tracker/manipulation/grasp_owner_detector.py:77)
+# ─────────────────────────────────────────────────────────────────────
+grasp_owner:
+  min_inside_count:  20
+  fallback_radius_m: 0.05
+  perception_keys:   ["grasp_owner_pid", "is_grasped"]
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Gravity-aware release predict
+# (ekf_tracker/manipulation/gravity_predict.py::predict_landing_pose
+#  kwarg defaults + EPS_ROUGHNESS_DEFAULT)
+# ─────────────────────────────────────────────────────────────────────
+gravity_predict:
+  gravity:           9.81
+  workspace_floor_z: -1.0
+  eps_roughness:     5.0e-3
+  max_drop_m:        2.0
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Object-dynamics table (utils/object_dynamics.py)
+# DEFAULT_DYNAMICS uses the same fields as table entries; the loader
+# builds an `ObjectDynamicsProperty` instance from each.
+# ─────────────────────────────────────────────────────────────────────
+object_dynamics:
+  default:
+    label:    default
+    e:        0.40
+    mu:       0.50
+    shape:    irregular
+    radius_m: 0.05
+    mass_kg:  0.1
+  shape_footprint_factor:
+    spherical:   0.25
+    cylindrical: 0.50
+    box:         0.70
+    irregular:   1.00
+  table:
+    apple:
+      label: apple
+      e: 0.30
+      mu: 0.55
+      shape: spherical
+      radius_m: 0.04
+      mass_kg: 0.1
+    milkbox:
+      label: milkbox
+      e: 0.40
+      mu: 0.45
+      shape: box
+      radius_m: 0.06
+      mass_kg: 0.1
+    cola:
+      label: cola
+      e: 0.50
+      mu: 0.40
+      shape: cylindrical
+      radius_m: 0.04
+      mass_kg: 0.1
+    cup:
+      label: cup
+      e: 0.40
+      mu: 0.50
+      shape: cylindrical
+      radius_m: 0.04
+      mass_kg: 0.1
+    pot:
+      label: pot
+      e: 0.40
+      mu: 0.50
+      shape: cylindrical
+      radius_m: 0.07
+      mass_kg: 0.1
+    flowerpot:
+      label: flowerpot
+      e: 0.30
+      mu: 0.55
+      shape: cylindrical
+      radius_m: 0.07
+      mass_kg: 0.1
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Online relation backend (RelationOrchestrator + RelationFilter +
+# RelationTriggerConfig + held-set closure)
+# ─────────────────────────────────────────────────────────────────────
+relation:
+  backend:          llm           # 'llm' | 'rest' | 'none'
+  score_threshold:  0.5
+  llm:
+    model_name:  gpt-5.1
+    temperature: 0.0
+  rest:
+    server_url:  null              # caller-runtime override
+  filter:
+    alpha:           0.3
+    threshold:       0.5
+    prune_threshold: 0.01          # was hardcoded at relation_filter.py:59
+  trigger:
+    relation_every_n_frames: 90
+    relation_on_grasp:       true
+    relation_on_release:     true
+    relation_on_new_object:  true
+  expand:
+    max_iters: 8                   # was relation_utils.py:33 default

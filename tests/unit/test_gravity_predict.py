@@ -1,4 +1,11 @@
-"""Unit tests for `pose_update/gravity_predict.py`."""
+"""Unit tests for ``ekf_tracker/manipulation/gravity_predict.py``.
+
+Post-Phase-D1/D5/D16 the dynamics table, voxel-observability defaults
+and the gravity-predict knobs all live in
+``ekf_tracker/configs/default.yaml``. The test file binds them once at
+import time and threads them through small wrappers so existing test
+bodies keep their pre-strip readability.
+"""
 from __future__ import annotations
 
 import numpy as np
@@ -9,11 +16,40 @@ from ekf_tracker.manipulation.gravity_predict import (
     predict_landing_pose,
 )
 from utils.object_dynamics import (
-    DEFAULT_DYNAMICS,
     ObjectDynamicsProperty,
-    lookup_dynamics,
+    lookup_dynamics as _raw_lookup_dynamics,
 )
 from perception.voxel_observability import VoxelObservability
+from ekf_tracker.configs import (
+    load_config,
+    build_object_dynamics_table,
+    build_gravity_predict_kwargs,
+    build_voxel_observability_kwargs,
+)
+
+_CFG = load_config()
+DEFAULT_DYNAMICS, _LABEL_TABLE, _SFF = build_object_dynamics_table(_CFG)
+_GRAVITY_KWARGS = build_gravity_predict_kwargs(_CFG)
+_VOXEL_OBS_KWARGS = build_voxel_observability_kwargs(_CFG)
+
+
+def lookup_dynamics(label, override=None):
+    """Thin wrapper that injects the YAML-loaded table + default."""
+    return _raw_lookup_dynamics(
+        label, default=DEFAULT_DYNAMICS, table=_LABEL_TABLE, override=override)
+
+
+def _predict(T_release, P_release, voxel_obs, dyn, **overrides):
+    """Wrapper around ``predict_landing_pose`` that injects the
+    YAML-loaded ``shape_footprint_factors`` and gravity kwargs.
+    """
+    kw = dict(_GRAVITY_KWARGS)
+    kw.update(overrides)
+    return predict_landing_pose(
+        T_release=T_release, P_release=P_release,
+        voxel_obs=voxel_obs, dyn=dyn,
+        shape_footprint_factors=_SFF,
+        **kw)
 
 
 def _grid_with_flat_surface_at(surface_z, *, voxel_size=0.05,
@@ -60,7 +96,7 @@ class TestSkipPath:
     def test_no_voxel_obs_returns_identity(self):
         T = _T_at(0, 0, 1.0)
         P = _P_init()
-        T_land, P_land, info = predict_landing_pose(
+        T_land, P_land, info = _predict(
             T, P, voxel_obs=None, dyn=DEFAULT_DYNAMICS)
         np.testing.assert_array_equal(T_land, T)
         np.testing.assert_array_equal(P_land, P)
@@ -77,7 +113,7 @@ class TestHitOccupied:
         g = _grid_with_flat_surface_at(0.4)
         dyn = lookup_dynamics("apple")  # spherical, r=0.04
         T = _T_at(0, 0, 1.0)
-        T_land, _, info = predict_landing_pose(T, _P_init(), g, dyn)
+        T_land, _, info = _predict(T, _P_init(), g, dyn)
         assert info.column_state == "hit_occupied"
         # Predicted landing_z ≈ surface_z + r = 0.4 + 0.04 = 0.44
         # (with quantization to voxel grid the surface_z may be off by half a voxel).
@@ -94,8 +130,8 @@ class TestHitOccupied:
         dyn_hard = ObjectDynamicsProperty(
             "hard", e=0.99, mu=0.5, shape="spherical", radius_m=0.04)
         T = _T_at(0, 0, 1.0)
-        _, _, info_soft = predict_landing_pose(T, _P_init(), g, dyn_soft)
-        _, _, info_hard = predict_landing_pose(T, _P_init(), g, dyn_hard)
+        _, _, info_soft = _predict(T, _P_init(), g, dyn_soft)
+        _, _, info_hard = _predict(T, _P_init(), g, dyn_hard)
         assert info_hard.sigma_bounce > info_soft.sigma_bounce
         # And the same ordering propagates into σ_xy.
         assert info_hard.sigma_xy > info_soft.sigma_xy
@@ -107,8 +143,8 @@ class TestHitOccupied:
         g_high = _grid_with_flat_surface_at(0.4)  # h = 0.6 m drop
         dyn = lookup_dynamics("apple")
         T = _T_at(0, 0, 1.0)
-        _, _, info_low = predict_landing_pose(T, _P_init(), g_low, dyn)
-        _, _, info_high = predict_landing_pose(T, _P_init(), g_high, dyn)
+        _, _, info_low = _predict(T, _P_init(), g_low, dyn)
+        _, _, info_high = _predict(T, _P_init(), g_high, dyn)
         assert info_high.sigma_xy > info_low.sigma_xy
         assert info_high.drop_height_m > info_low.drop_height_m
 
@@ -117,7 +153,7 @@ class TestHitOccupied:
         dyn = lookup_dynamics("apple")
         # Object already at the surface (h ≈ 0).
         T = _T_at(0, 0, 0.41)
-        T_land, _, info = predict_landing_pose(T, _P_init(), g, dyn)
+        T_land, _, info = _predict(T, _P_init(), g, dyn)
         # Translation should be unchanged (we're already on the surface).
         # σ_xy collapses to the shape factor only.
         assert info.sigma_xy < 0.05
@@ -134,10 +170,11 @@ class TestVoxelDrivenBranches:
         g = VoxelObservability(
             voxel_size_m=0.05,
             workspace_aabb=((-1.0, -1.0, -1.0), (1.0, 1.0, 2.0)),
+            n_min_hit=2, n_min_pass=3,
         )
         dyn = lookup_dynamics("apple")
         T = _T_at(0, 0, 1.0)
-        _, P_land, info = predict_landing_pose(
+        _, P_land, info = _predict(
             T, _P_init(), g, dyn, workspace_floor_z=-1.0)
         assert info.column_state == "all_unseen"
         # σ_z should be huge — at least half the workspace height.
@@ -149,6 +186,7 @@ class TestVoxelDrivenBranches:
         g = VoxelObservability(
             voxel_size_m=0.05,
             workspace_aabb=((-1.0, -1.0, -1.0), (1.0, 1.0, 2.0)),
+            n_min_hit=2, n_min_pass=3,
         )
         i, j, k_top = g.world_to_voxel([0.0, 0.0, 1.0])
         _, _, k_floor = g.world_to_voxel([0.0, 0.0, -0.9])
@@ -156,7 +194,7 @@ class TestVoxelDrivenBranches:
             g._n_pass[i, j, k] = g.n_min_pass
         dyn = lookup_dynamics("apple")
         T = _T_at(0, 0, 1.0)
-        T_land, _, info = predict_landing_pose(
+        T_land, _, info = _predict(
             T, _P_init(), g, dyn,
             workspace_floor_z=-0.9, max_drop_m=2.0)
         assert info.column_state == "all_empty"
@@ -185,8 +223,8 @@ class TestVoxelDrivenBranches:
 
         dyn = lookup_dynamics("apple")
         T = _T_at(0, 0, 1.0)
-        _, P_clean, info_clean = predict_landing_pose(T, _P_init(), g_clean, dyn)
-        _, P_mixed, info_mixed = predict_landing_pose(T, _P_init(), g_mixed, dyn)
+        _, P_clean, info_clean = _predict(T, _P_init(), g_clean, dyn)
+        _, P_mixed, info_mixed = _predict(T, _P_init(), g_mixed, dyn)
         assert info_clean.column_state == "hit_occupied"
         assert info_mixed.column_state == "mixed_unseen"
         # Mixed-unseen has a band of UNSEEN voxels between release height
@@ -206,7 +244,7 @@ class TestCovarianceShape:
         g = _grid_with_flat_surface_at(0.4)
         dyn = lookup_dynamics("apple")
         T = _T_at(0, 0, 1.0)
-        _, P_land, _ = predict_landing_pose(T, _P_init(), g, dyn)
+        _, P_land, _ = _predict(T, _P_init(), g, dyn)
         # Symmetric + PSD.
         np.testing.assert_allclose(P_land, P_land.T)
         eigvals = np.linalg.eigvalsh(P_land)
@@ -214,12 +252,12 @@ class TestCovarianceShape:
 
     def test_invalid_T_raises(self):
         with pytest.raises(ValueError):
-            predict_landing_pose(np.eye(3), np.eye(6),
+            _predict(np.eye(3), np.eye(6),
                                   voxel_obs=None, dyn=DEFAULT_DYNAMICS)
 
     def test_invalid_P_raises(self):
         with pytest.raises(ValueError):
-            predict_landing_pose(np.eye(4), np.eye(3),
+            _predict(np.eye(4), np.eye(3),
                                   voxel_obs=None, dyn=DEFAULT_DYNAMICS)
 
 
@@ -233,9 +271,9 @@ class TestReleaseVelocity:
         g = _grid_with_flat_surface_at(0.4)
         dyn = lookup_dynamics("apple")
         T = _T_at(0, 0, 1.0)
-        _, _, info_still = predict_landing_pose(T, _P_init(), g, dyn,
+        _, _, info_still = _predict(T, _P_init(), g, dyn,
                                                   v_release_world=np.zeros(3))
-        _, _, info_moving = predict_landing_pose(
+        _, _, info_moving = _predict(
             T, _P_init(), g, dyn,
             v_release_world=np.array([0.5, 0.0, 0.0]))
         assert info_moving.sigma_release_v > info_still.sigma_release_v

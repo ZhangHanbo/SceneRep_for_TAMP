@@ -50,39 +50,24 @@ class SceneView:
 
 
 # ─────────────────────────────────────────────────────────────────────
-#  Default configuration (from main() lines 3422-3470 verbatim)
+#  Default configuration --- loaded bit-exactly from
+#  ekf_tracker/configs/default.yaml. The two-hierarchy contract:
+#  default + customization YAMLs are the only sources of defaults.
 # ─────────────────────────────────────────────────────────────────────
 
 def _default_bernoulli_cfg(K: np.ndarray,
                            image_shape: Tuple[int, int] = (480, 640),
                            ) -> BernoulliConfig:
-    """Replicates the BernoulliConfig main() builds at lines 3422-3470."""
-    return BernoulliConfig(
-        association_mode="hungarian",
-        p_s=1.0,
-        p_d=0.9,
-        alpha=4.4,
-        lambda_c=1.0,
-        lambda_b=1.0,
-        r_conf=0.5,
-        r_min=1e-3,
-        G_in=12.59,
-        G_out=25.0,
-        P_max=np.diag([0.25**2] * 3 + [(np.pi / 4) ** 2] * 3),
-        enable_visibility=True,
-        enable_huber=True,
-        init_cov_from_R=False,
-        enforce_label_match=False,
-        hungarian_label_penalty=6.0,
-        hungarian_score_weight=2.0,
-        gate_mode="trans",
-        G_out_trans=21.108,
-        cost_d2_mode="sum",
-        P_min_diag=np.array([0.005**2] * 3 + [0.05**2] * 3),
-        self_merge_trans_m=0.05,
-        K=K,
-        image_shape=image_shape,
-    )
+    """Build the production-default :class:`BernoulliConfig`.
+
+    Equivalent to the previous inline construction (verified
+    bit-exactly by ``tests/integration/test_config_loader.py::
+    test_default_yaml_matches_production_defaults``); the values now
+    live in ``ekf_tracker/configs/default.yaml``.
+    """
+    from ekf_tracker.configs import load_config, to_bernoulli_config
+    return to_bernoulli_config(load_config(),
+                                K=K, image_shape=image_shape)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -127,7 +112,7 @@ class EkfTracker:
         *,
         T_bc: Optional[np.ndarray] = None,
         robot_type: str = "fetch",
-        relation_backend: str = "llm",
+        relation_backend: Optional[str] = None,
         relation_cache_dir: Optional[str] = None,
         pose_method: str = "icp_chain",
         owl_server: Optional[str] = None,
@@ -140,35 +125,73 @@ class EkfTracker:
         det_server: Optional[str] = None,
     ):
         self.K = np.asarray(K, dtype=np.float64)
-        self._cfg = bernoulli_cfg or _default_bernoulli_cfg(
-            self.K, image_shape=image_shape)
+        # Load defaults from the canonical YAML when not explicitly
+        # supplied. The two-hierarchy contract: defaults live in
+        # ekf_tracker/configs/default.yaml; nothing else.
+        from ekf_tracker.configs import (
+            load_config, to_bernoulli_config, to_trigger_config,
+        )
+        _ekf_cfg_dict = load_config()
+        self._cfg = bernoulli_cfg or to_bernoulli_config(
+            _ekf_cfg_dict, K=self.K, image_shape=image_shape)
         # The two-tier subclass is a strict superset of GaussianEkfTracker:
         # it inherits the entire fast tier and adds the slow tier used by
-        # `smooth()`. We default to a never-fires trigger so the facade's
-        # per-frame `step()` reproduces `visualize_ekf_tracking.main()`'s
-        # pipeline exactly; callers can opt into auto-triggering by passing
-        # an explicit TriggerConfig.
-        self._trigger = trigger or TriggerConfig(
-            on_grasp=False, on_release=False,
-            on_new_object=False, periodic_every_n_frames=-1,
+        # `smooth()`. The default YAML's `trigger:` section mirrors the
+        # never-fires policy that reproduces `visualize_ekf_tracking.main()`
+        # exactly; callers can opt into auto-triggering via a
+        # customization YAML or an explicit `trigger=` kwarg.
+        self._trigger = trigger or to_trigger_config(_ekf_cfg_dict)
+        from ekf_tracker.configs import (
+            build_visibility_kwargs, build_det_dedup_kwargs,
+            build_process_noise_schedule, build_fast_tier_noise_config,
         )
         self._tracker = TwoTierOrchestratorGaussian(
             self.K, self._cfg,
             pose_method=pose_method,
             T_bc=T_bc,
             trigger=self._trigger,
+            visibility_kwargs=build_visibility_kwargs(_ekf_cfg_dict),
+            det_dedup_kwargs=build_det_dedup_kwargs(_ekf_cfg_dict),
+            process_noise_schedule=build_process_noise_schedule(_ekf_cfg_dict),
+            fast_tier_noise=build_fast_tier_noise_config(_ekf_cfg_dict),
         )
+        from ekf_tracker.configs import (
+            build_gripper_phase_tracker_kwargs,
+            build_grasp_owner_detector_kwargs,
+            build_voxel_observability_kwargs,
+            build_voxel_integrate_kwargs,
+            build_gravity_predict_kwargs,
+            build_held_set_expansion_kwargs,
+            build_object_dynamics_table,
+        )
+        self._voxel_integrate_kwargs = build_voxel_integrate_kwargs(_ekf_cfg_dict)
+        self._gravity_predict_kwargs = build_gravity_predict_kwargs(_ekf_cfg_dict)
+        self._held_set_expansion_kwargs = build_held_set_expansion_kwargs(_ekf_cfg_dict)
+        (self._dynamics_default,
+         self._dynamics_table,
+         self._dynamics_footprint) = build_object_dynamics_table(_ekf_cfg_dict)
         self._gripper_geom = create_gripper_geometry(robot_type=robot_type)
-        self._grasp_detector = GraspOwnerDetector(gripper=self._gripper_geom)
-        self._grip_inferrer = _GripperStateInferrer(detector=self._grasp_detector)
+        self._grasp_detector = GraspOwnerDetector(
+            gripper=self._gripper_geom,
+            **build_grasp_owner_detector_kwargs(_ekf_cfg_dict),
+        )
+        self._grip_inferrer = _GripperStateInferrer(
+            detector=self._grasp_detector,
+            **build_gripper_phase_tracker_kwargs(_ekf_cfg_dict),
+        )
+        from ekf_tracker.configs import build_relation_orchestrator_kwargs
+        _rel_kwargs = build_relation_orchestrator_kwargs(_ekf_cfg_dict)
+        # The `relation_backend` constructor kwarg overrides the YAML
+        # for ad-hoc per-call backend selection; everything else comes
+        # from the YAML.
+        if relation_backend is not None:
+            _rel_kwargs["backend"] = relation_backend
         self._relation_pipeline = RelationOrchestrator(
-            backend=relation_backend,
             cache_dir=relation_cache_dir,
+            **_rel_kwargs,
         )
         self._voxel_obs = voxel_obs or VoxelObservability(
-            voxel_size_m=0.05,
-            workspace_aabb=((-2.5, -2.5, -1.0), (2.5, 2.5, 2.0)),
-            n_min_hit=2, n_min_pass=3,
+            **build_voxel_observability_kwargs(_ekf_cfg_dict),
         )
         # OWL + SAM2 streaming server URLs for live `detect()`. Defaults
         # come from `scripts/rosbag2dataset/server_configs.py`. Either
@@ -293,8 +316,7 @@ class EkfTracker:
                 K=K,
                 T_cw=(np.asarray(slam_pose, dtype=np.float64)
                       @ np.asarray(T_bc_for_vox, dtype=np.float64)),
-                max_range_m=3.0,
-                subsample=4,
+                **self._voxel_integrate_kwargs,
             )
         except Exception as e:
             print(f"[WARN] voxel_obs.integrate_depth failed at fr "
@@ -364,7 +386,8 @@ class EkfTracker:
 
         # 7. Held set expansion (3581-3586).
         held_oids = expand_held_with_relations(
-            held_seed, self._relation_pipeline.edges)
+            held_seed, self._relation_pipeline.edges,
+            **self._held_set_expansion_kwargs)
         held_oids = {o for o in held_oids
                      if o in self._tracker.state.objects}
 
@@ -391,8 +414,16 @@ class EkfTracker:
 
         # 10. Gravity-aware predict at release transition (3606-3656).
         cur_phase = gripper_state.get("phase", "idle")
-        if (self._prev_phase in ("holding", "releasing")
-                and cur_phase not in ("holding", "releasing")
+        # Fire gravity-predict at the holding→{releasing,idle} edge --- the
+        # FRAME the gripper opens --- not at releasing→idle. Waiting for
+        # the FSM's release dwell (`min_transition_frames` frames) leaves
+        # the apple hanging in mid-air at its in-gripper height during the
+        # dwell, then teleporting on the dwell's last frame. Triggering
+        # earlier collapses that mid-air hang to zero frames. A re-grasp
+        # transition holding→grasping is excluded so a width-jitter flap
+        # cannot install a landing prior on a still-held object.
+        if (self._prev_phase == "holding"
+                and cur_phase in ("releasing", "idle")
                 and self._prev_held is not None
                 and self._prev_held in self._tracker.state.objects):
             try:
@@ -450,7 +481,8 @@ class EkfTracker:
         if pe_w is None:
             return
         label = self._tracker.object_labels.get(prev_held)
-        dyn = lookup_dynamics(label)
+        dyn = lookup_dynamics(
+            label, default=self._dynamics_default, table=self._dynamics_table)
         # Live-object overlay: every other live oid contributes.
         other_voxels: List[Tuple[float, float, float, float]] = []
         for other_oid, other_pe in (
@@ -459,7 +491,8 @@ class EkfTracker:
                 continue
             T_o = other_pe.T
             other_dyn = lookup_dynamics(
-                self._tracker.object_labels.get(int(other_oid)))
+                self._tracker.object_labels.get(int(other_oid)),
+                default=self._dynamics_default, table=self._dynamics_table)
             other_voxels.append((
                 float(T_o[0, 3]), float(T_o[1, 3]), float(T_o[2, 3]),
                 float(other_dyn.radius_m)))
@@ -468,8 +501,9 @@ class EkfTracker:
             P_release=pe_w.cov,
             voxel_obs=self._voxel_obs,
             dyn=dyn,
-            workspace_floor_z=-1.0,
+            shape_footprint_factors=self._dynamics_footprint,
             live_object_voxels=other_voxels,
+            **self._gravity_predict_kwargs,
         )
         # Write back into base-frame state.
         obj = self._tracker.state.objects.get(prev_held)

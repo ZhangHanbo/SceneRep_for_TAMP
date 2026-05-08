@@ -1145,6 +1145,8 @@ def run_ekf_dataset(DATASET_PATH, config, args):
         cmd = ["python3", viz_script, "--trajectory", traj_name]
         if args.max_frames is not None:
             cmd += ["--max-frame", str(args.max_frames)]
+        if getattr(args, "ekf_config_path", None):
+            cmd += ["--config-path", str(args.ekf_config_path)]
         print(f"[EKF/{args.ekf_backend}] dispatching to: {' '.join(cmd)}")
         subprocess.run(cmd, check=False)
         return
@@ -1170,6 +1172,12 @@ def parse_args():
                        help="EKF backend (only when --tracker=ekf).")
     parser.add_argument('--max-frames', type=int, default=None,
                        help="Optional frame cap (smoke testing).")
+    parser.add_argument('--ekf-config-path', dest='ekf_config_path',
+                       default=None,
+                       help="Customization YAML path passed through to "
+                            "scripts/visualize_ekf_tracking.py "
+                            "(--tracker=ekf only). Defaults to "
+                            "ekf_tracker/configs/default.yaml.")
     return parser.parse_args()
 
 

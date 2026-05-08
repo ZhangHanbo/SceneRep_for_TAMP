@@ -24,7 +24,11 @@ def _build_tracker_with_two_close_apples():
     from importlib import import_module
     viz = import_module("scripts.visualize_ekf_tracking")
 
-    cfg = viz.BernoulliConfig()
+    # Load the canonical default config; BernoulliConfig has no
+    # dataclass defaults post-Phase C.
+    from ekf_tracker.configs import load_config, to_bernoulli_config
+    cfg = to_bernoulli_config(load_config(),
+                                K=viz.K_DEFAULT, image_shape=(480, 640))
     tracker = viz.GaussianEkfTracker(
         K=viz.K_DEFAULT, bernoulli_cfg=cfg,
         T_bc=np.eye(4))

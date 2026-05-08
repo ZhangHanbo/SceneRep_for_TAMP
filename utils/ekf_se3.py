@@ -344,62 +344,52 @@ def pose_is_uncertain(cov: np.ndarray, threshold: float = -5.0) -> bool:
 # All values are variances (σ²) for translation (m²) and rotation (rad²).
 # Callers can override by passing their own Q.
 
-_Q_STATIC_STABLE      = np.diag([1e-8]*3  + [1e-8]*3)   # effectively frozen
-_Q_STATIC_UNSTABLE    = np.diag([1e-5]*3  + [1e-5]*3)   # slow drift
-_Q_IDLE_DEFAULT       = np.diag([1e-6]*3  + [1e-6]*3)   # idle re-observation
-_Q_JUST_RELEASED      = np.diag([1e-3]*3  + [1e-3]*3)   # may settle/roll
-# Held object during grip closing/opening: a transient larger Q than
-# steady holding (the object can shift inside the closing jaws by a
-# few cm before the grip stabilises) but bounded by the proprio
-# anchor — we know the gripper pose to mm via T_bg, so the held
-# object's pose can't be "essentially unknown". A 1.0 m std (the
-# original placeholder) explodes the cov 100x in one frame and
-# defeats the rigid-attachment predict.
-_Q_GRASPING_RELEASING = np.diag([0.02**2]*3 + [0.10**2]*3)
-                                                  # 2 cm trans, ~6° rot
-# Held object, base-frame fusion. The rigid-attachment mean model
-# (μ ← ΔT_bg · μ) is only *approximately* correct: proprioception has
-# ~mm-scale noise, the object can slip in the grip by cm, and the
-# per-frame centroid-from-mask is noisy. Treating this as "effectively
-# frozen" (1e-8) collapses the gate and every new detection goes to
-# birth. A per-frame growth of √(2.5e-4) = 1.6 cm (trans) /
-# √(1e-3) = 1.8 deg (rot) reaches P_max in ~250 frames of occlusion,
-# which matches the physical reality (after ~8 s of not seeing a held
-# object, we should expect ≥25 cm uncertainty).
-_Q_HOLDING_BASE_FRAME = np.diag([2.5e-4]*3 + [1e-3]*3)  # grip slack + proprio jitter
-_Q_HELD_WORLD_FRAME   = np.diag([1e-4]*3  + [1e-4]*3)   # inherits base drift
+# Module-level Q constants and the 5/50 frame thresholds removed.
+# The process-noise schedule now lives in
+# ``ekf_tracker/configs/default.yaml`` (section ``process_noise:``).
+# Build a schedule dict via
+# ``ekf_tracker.configs.build_process_noise_schedule(cfg)`` and pass
+# it through ``process_noise_for_phase``.
 
 
 def process_noise_for_phase(phase: str,
                             is_target: bool,
-                            frames_since_observation: int = 0,
-                            frame: str = "world") -> np.ndarray:
+                            *,
+                            frames_since_observation: int,
+                            frame: str,
+                            schedule: dict) -> np.ndarray:
     """Return process noise Q for a given manipulation phase and role.
 
     Args:
         phase:     'idle' | 'grasping' | 'holding' | 'releasing'.
         is_target: True if this is the object being manipulated.
         frames_since_observation: for stability decay.
-        frame:     'world' (default) or 'base'. The 'base' frame applies
-                   to the held object tracked in base-frame fusion — its
-                   process noise is tiny because it's rigidly attached to
-                   the EE in that frame.
+        frame:     'world' or 'base'. The 'base' frame applies to the
+                   held object tracked in base-frame fusion --- its
+                   process noise is tiny because it is rigidly attached
+                   to the EE in that frame.
+        schedule:  dict of process-noise constants returned by
+                   :func:`ekf_tracker.configs.build_process_noise_schedule`.
+                   Required keys: ``Q_static_stable``, ``Q_static_unstable``,
+                   ``Q_idle``, ``Q_just_released``, ``Q_grasping_releasing``,
+                   ``Q_holding_base_frame``, ``Q_held_world_frame``,
+                   ``frames_unstable_threshold``, ``frames_stable_threshold``.
 
     Returns:
         (6, 6) process noise covariance for one frame of prediction.
     """
     if is_target:
         if phase in ("grasping", "releasing"):
-            return _Q_GRASPING_RELEASING.copy()
+            return schedule["Q_grasping_releasing"].copy()
         if phase == "holding":
-            return (_Q_HOLDING_BASE_FRAME.copy() if frame == "base"
-                    else _Q_HELD_WORLD_FRAME.copy())
-    # Non-target objects, or target during idle
-    if frames_since_observation < 5:
-        return _Q_IDLE_DEFAULT.copy()
-    if frames_since_observation < 50:
-        return _Q_STATIC_UNSTABLE.copy()
-    return _Q_STATIC_STABLE.copy()
+            return (schedule["Q_holding_base_frame"].copy() if frame == "base"
+                    else schedule["Q_held_world_frame"].copy())
+    # Non-target objects, or target during idle.
+    if frames_since_observation < schedule["frames_unstable_threshold"]:
+        return schedule["Q_idle"].copy()
+    if frames_since_observation < schedule["frames_stable_threshold"]:
+        return schedule["Q_static_unstable"].copy()
+    return schedule["Q_static_stable"].copy()
 
 
 # ─────────────────────────────────────────────────────────────────────

@@ -2,55 +2,114 @@
 \providecommand\hyper@newdestlabel[2]{}
 \providecommand\HyField@AuxAddToFields[1]{}
 \providecommand\HyField@AuxAddToCoFields[2]{}
-\newlabel{sec:overview}{{}{1}{Part I — Algorithmic Overview}{section*.1}{}}
+\newlabel{sec:summary}{{}{1}{Part I --- One-page Algorithmic Summary}{section*.1}{}}
 \@writefile{toc}{\contentsline {paragraph}{1. State.}{1}{section*.2}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{2. Predict.}{1}{section*.3}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{3. Detection conditioning.}{1}{section*.4}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{4. Association.}{1}{section*.5}\protected@file@percent }
 \@writefile{toc}{\contentsline {paragraph}{5. Update.}{1}{section*.6}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{6. Birth and prune.}{1}{section*.7}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{7. Self-merge.}{1}{section*.8}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{8. Relations.}{2}{section*.9}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{9. Held-set expansion.}{2}{section*.10}\protected@file@percent }
-\newlabel{sec:detail}{{}{2}{Part II — Detailed Elaboration}{section*.11}{}}
+\@writefile{toc}{\contentsline {paragraph}{6. Birth and prune.}{2}{section*.7}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{7. Self-merge.}{2}{section*.8}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{8. Relations and held-set expansion.}{2}{section*.9}\protected@file@percent }
+\newlabel{sec:algo}{{}{2}{Part II --- Detailed Algorithmic Exposition}{section*.10}{}}
 \newlabel{eq:proc}{{1}{2}{II.2 Predict}{equation.1}{}}
 \newlabel{eq:phi}{{2}{2}{II.2 Predict}{equation.2}{}}
 \newlabel{eq:bern_pred_r}{{3}{2}{II.2 Predict}{equation.3}{}}
-\@writefile{toc}{\contentsline {paragraph}{Why the unobserved branch freezes $\Sigma _{bo}$ (keyframe mechanism).}{3}{section*.14}\protected@file@percent }
-\newlabel{eq:telescope}{{4}{3}{Why the unobserved branch freezes $\Sigma _{bo}$ (keyframe mechanism)}{equation.4}{}}
-\@writefile{toc}{\contentsline {paragraph}{Cost.}{4}{section*.17}\protected@file@percent }
-\newlabel{eq:cost_sam2}{{5}{4}{Cost}{equation.5}{}}
-\@writefile{toc}{\contentsline {paragraph}{Label-purity gate}{4}{section*.18}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Outer gate.}{4}{section*.19}\protected@file@percent }
-\newlabel{eq:hung}{{6}{4}{Outer gate}{equation.6}{}}
-\newlabel{eq:meas_compose}{{7}{5}{II.5 Update}{equation.7}{}}
-\newlabel{eq:ekf_lik}{{8}{5}{II.5 Update}{equation.8}{}}
-\newlabel{sec:world_compose}{{}{5}{World-frame composition}{section*.21}{}}
-\@writefile{toc}{\contentsline {paragraph}{World-frame composition.}{5}{section*.21}\protected@file@percent }
-\newlabel{eq:world_compose}{{9}{5}{World-frame composition}{equation.9}{}}
-\@writefile{toc}{\contentsline {paragraph}{World-frame overwrite (release hook).}{5}{section*.22}\protected@file@percent }
-\newlabel{sec:chain}{{}{5}{Per-track observation chain (diagnostic)}{section*.23}{}}
-\@writefile{toc}{\contentsline {paragraph}{Per-track observation chain (diagnostic).}{5}{section*.23}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Huber reweight.}{5}{section*.24}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Why the unobserved branch freezes $\Sigma _{bo}$ (the keyframe mechanism).}{3}{section*.13}\protected@file@percent }
+\newlabel{eq:telescope}{{4}{3}{Why the unobserved branch freezes $\Sigma _{bo}$ (the keyframe mechanism)}{equation.4}{}}
+\@writefile{toc}{\contentsline {paragraph}{Cost.}{3}{section*.16}\protected@file@percent }
+\newlabel{eq:cost_sam2}{{5}{3}{Cost}{equation.5}{}}
+\@writefile{toc}{\contentsline {paragraph}{Label-purity gate (soft mode only).}{4}{section*.17}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Outer gates.}{4}{section*.18}\protected@file@percent }
+\newlabel{eq:hung}{{6}{4}{Outer gates}{equation.6}{}}
+\newlabel{eq:meas_compose}{{7}{4}{II.5 Update}{equation.7}{}}
+\newlabel{eq:ekf_lik}{{8}{4}{II.5 Update}{equation.8}{}}
+\newlabel{sec:world_compose}{{}{4}{World-frame composition}{section*.20}{}}
+\@writefile{toc}{\contentsline {paragraph}{World-frame composition.}{4}{section*.20}\protected@file@percent }
+\newlabel{eq:world_compose}{{9}{4}{World-frame composition}{equation.9}{}}
+\@writefile{toc}{\contentsline {paragraph}{World-frame overwrite (release hook).}{5}{section*.21}\protected@file@percent }
+\newlabel{sec:chain}{{}{5}{Per-track observation chain (diagnostic)}{section*.22}{}}
+\@writefile{toc}{\contentsline {paragraph}{Per-track observation chain (diagnostic).}{5}{section*.22}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Huber reweight.}{5}{section*.23}\protected@file@percent }
 \newlabel{eq:huber_w}{{10}{5}{Huber reweight}{equation.10}{}}
-\newlabel{eq:birth_r}{{11}{6}{II.6 Birth and prune}{equation.11}{}}
-\newlabel{eq:birth_state}{{12}{6}{II.6 Birth and prune}{equation.12}{}}
-\@writefile{toc}{\contentsline {paragraph}{Existence updates.}{6}{section*.26}\protected@file@percent }
+\newlabel{eq:birth_r}{{11}{5}{II.6 Birth and prune}{equation.11}{}}
+\newlabel{eq:birth_state}{{12}{5}{II.6 Birth and prune}{equation.12}{}}
+\@writefile{toc}{\contentsline {paragraph}{Existence updates.}{6}{section*.25}\protected@file@percent }
 \newlabel{eq:r_assoc}{{13}{6}{Existence updates}{equation.13}{}}
 \newlabel{eq:r_miss}{{14}{6}{Existence updates}{equation.14}{}}
-\@writefile{toc}{\contentsline {paragraph}{Prune.}{6}{section*.27}\protected@file@percent }
-\newlabel{eq:self_merge_info}{{15}{7}{II.7 Self-merge}{equation.15}{}}
-\@writefile{loa}{\contentsline {algorithm}{\numberline {1}{\ignorespaces Self-merge pass.}}{7}{algorithm.1}\protected@file@percent }
-\newlabel{sec:vis}{{}{7}{II.8 Visibility}{section*.29}{}}
+\@writefile{toc}{\contentsline {paragraph}{Prune.}{6}{section*.26}\protected@file@percent }
+\newlabel{eq:self_merge_info}{{15}{6}{II.7 Self-merge}{equation.15}{}}
+\@writefile{loa}{\contentsline {algorithm}{\numberline {1}{\ignorespaces Self-merge pass.}}{6}{algorithm.1}\protected@file@percent }
+\newlabel{sec:vis}{{}{7}{II.8 Visibility}{section*.28}{}}
 \newlabel{eq:pv}{{16}{7}{II.8 Visibility}{equation.16}{}}
-\newlabel{sec:held}{{}{8}{II.10 Held-set expansion}{section*.31}{}}
-\newlabel{sec:gravity}{{}{8}{II.11 Gravity-aware predict at release}{section*.32}{}}
-\@writefile{toc}{\contentsline {paragraph}{Voxel observability.}{8}{section*.33}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Object dynamics property.}{9}{section*.34}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Parametric dispersion model}{9}{section*.35}\protected@file@percent }
-\newlabel{eq:gravity_sigma}{{17}{9}{Parametric dispersion model}{equation.17}{}}
-\@writefile{toc}{\contentsline {paragraph}{Voxel-driven $h$ branch.}{9}{section*.36}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Trigger.}{9}{section*.37}\protected@file@percent }
-\@writefile{toc}{\contentsline {paragraph}{Toggle.}{10}{section*.38}\protected@file@percent }
-\@writefile{loa}{\contentsline {algorithm}{\numberline {2}{\ignorespaces One frame of the Bernoulli-EKF tracker (driver loop).}}{11}{algorithm.2}\protected@file@percent }
-\gdef \@abspage@last{13}
+\newlabel{sec:held}{{}{8}{II.10 Held-set expansion}{section*.30}{}}
+\newlabel{sec:gravity}{{}{8}{II.11 Gravity-aware predict at release}{section*.31}{}}
+\@writefile{toc}{\contentsline {paragraph}{Voxel observability.}{8}{section*.32}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Object dynamics property.}{8}{section*.33}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Parametric dispersion model.}{8}{section*.34}\protected@file@percent }
+\newlabel{eq:gravity_sigma}{{17}{8}{Parametric dispersion model}{equation.17}{}}
+\@writefile{toc}{\contentsline {paragraph}{Voxel-driven $h$ branch.}{9}{section*.35}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Trigger.}{9}{section*.36}\protected@file@percent }
+\@writefile{loa}{\contentsline {algorithm}{\numberline {2}{\ignorespaces One frame of the Bernoulli-EKF tracker.}}{10}{algorithm.2}\protected@file@percent }
+\newlabel{sec:map}{{}{11}{Part III --- Algorithm-to-Code Map}{section*.40}{}}
+\newlabel{sec:critique}{{}{14}{Part IV --- Reviewer Critique}{section*.55}{}}
+\newlabel{sec:audit}{{}{17}{Part V --- Per-Component Justification Audit}{section*.62}{}}
+\@writefile{toc}{\contentsline {paragraph}{Per-object Bernoulli--Gaussian belief.}{17}{section*.64}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Body-frame storage with SLAM marginal decoupled.}{18}{section*.65}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Right-trivialised SE(3) tangent (translation-then-rotation).}{18}{section*.66}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Dual-backend abstraction (Gaussian + RBPF).}{18}{section*.67}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {predict\_static\_all} alongside \texttt  {predict\_static}.}{18}{section*.68}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{World-static motion ($\mu _{bo,k}=u_k\mu _{bo,k-1}$).}{18}{section*.70}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Rigid-attached motion ($\mu _{bo,k}=\delta _{bg,k}\mu _{bo,k-1}$).}{18}{section*.71}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Adjoint covariance transport.}{18}{section*.72}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Keyframe-freeze branch (skip cov update for unobserved tracks).}{18}{section*.73}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{$Q$ schedule on \texttt  {frames\_since\_obs} ($1{\rm  e}{-}6\to 1{\rm  e}{-}5\to 1{\rm  e}{-}8$).}{18}{section*.74}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Covariance saturation $\Phi $ (trace cap on $P$).}{19}{section*.75}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Voxel-containment subpart suppression.}{19}{section*.77}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Centroid validity gate.}{19}{section*.78}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Hungarian assignment.}{19}{section*.80}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{$\chi ^2_3$ probabilistic gate at $G_{\text  {out},t}=21.108$.}{19}{section*.81}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Translation-only Mahalanobis (assume $R_{rot}=\infty $).}{19}{section*.82}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Hard Euclidean residual cap (\texttt  {max\_residual\_m}=$0.30$).}{19}{section*.83}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{SAM2 continuity bonus $\alpha =4.4$.}{19}{section*.84}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Hard label gate (default \texttt  {enforce\_label\_match=True}).}{20}{section*.85}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Soft label penalty $\beta $ and score weight $\gamma $.}{20}{section*.86}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Joseph form on full SE(3).}{20}{section*.88}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Translation-only Joseph with $P_{rt}^{\text  {post}}=0$.}{20}{section*.89}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Held-track prefilters (\texttt  {held\_meas\_radius\_m}=$0.25$, \texttt  {held\_meas\_innov\_max\_m}=$0.20$).}{20}{section*.90}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{One-shot ICP at admission.}{20}{section*.91}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Three ICP backends (\texttt  {centroid} / \texttt  {icp\_chain} / \texttt  {icp\_anchor}).}{20}{section*.92}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Huber inner / outer reweight.}{20}{section*.93}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Adaptive Barron robust loss (slow tier only).}{21}{section*.94}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{World-frame composition $\mu _{wo},\Sigma _{wo}$ (\eqref  {eq:world_compose}).}{21}{section*.95}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Dual update primitives (\texttt  {update\_observation} vs \texttt  {update\_observation\_centroid}).}{21}{section*.96}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Bernoulli existence updates ($r$-predict, $r$-assoc, $r$-miss).}{21}{section*.98}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Birth existence $r_0=\lambda _b\hat  s/(\lambda _b\hat  s+\lambda _c)$.}{21}{section*.99}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Confirm-$k$ M-of-N gate.}{21}{section*.100}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Confirm-$k$=$3$, score-floor=$0.20$, border-margin=$2$\,px, TTL=$30$\,frames, near-live=$0.05$\,m.}{21}{section*.101}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{$r_{\min }=10^{-3}$ prune threshold.}{21}{section*.102}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{$r_{\text  {held floor}}=0.5$.}{21}{section*.103}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Information-sum fusion of two Gaussians.}{21}{section*.105}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Same-label gate at fixed $5$\,cm Euclidean (\texttt  {self\_merge\_trans\_m}=$0.05$).}{22}{section*.106}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Protected-pairs gate (relations-derived $\mathcal  P$).}{22}{section*.107}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Continuous $p_v$ in miss-frame likelihood ($\tilde  p_d=p_d\cdot p_v$).}{22}{section*.109}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Fibonacci-sphere visibility predicate.}{22}{section*.110}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Per-edge EMA smoothing ($\alpha =0.3$, threshold $0.5$).}{22}{section*.112}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Trigger gate (event triggers $+$ every-$90$-frame heartbeat).}{22}{section*.113}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Convention swap (parent=supported, child=supporter, against the LLM's $j$-on-$i$).}{22}{section*.114}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Closure under in/on edges.}{22}{section*.116}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Iteration cap of $8$.}{22}{section*.117}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Voxel observability grid (3-state with hit / pass hysteresis).}{23}{section*.119}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Voxel-driven $h$ branches \texttt  {hit\_occupied} and \texttt  {all\_empty}.}{23}{section*.120}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Voxel-driven $h$ branches \texttt  {mixed\_unseen} extra inflation and \texttt  {all\_unseen} midpoint heuristic.}{23}{section*.121}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Object dynamics table $(e,\mu ,\text  {shape},r_{\text  {obj}})$ for six labels (\texttt  {apple, milkbox, cola, cup, pot, flowerpot}).}{23}{section*.122}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Parametric dispersion model (\eqref  {eq:gravity_sigma}: $\sigma _{xy},\sigma _z,\sigma _{\text  {yaw}}$ in terms of $h$, $e$, $r_{\text  {obj}}$, $\bm  {v}_{\text  {rel}}$).}{23}{section*.123}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{One-shot release-trigger (\textsc  {Releasing}$\to $\textsc  {Idle}, overwrite EKF state once).}{23}{section*.124}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Workspace AABB fixed at $5\times 5\times 3$\,m, $5$\,cm voxel.}{23}{section*.125}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Four-phase FSM with width hysteresis and stability test.}{24}{section*.127}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Width thresholds (closed=$25$\,mm, open=$40$\,mm, delta=$5$\,mm, min-frames=$5$).}{24}{section*.128}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Held-oid selection by inside-gripper containment fraction.}{24}{section*.129}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {perception/camera\_pose\_refiner.py} (337 LoC).}{24}{section*.131}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{Slow tier in \texttt  {ekf\_tracker/factor\_graph.py} (when not promoted).}{24}{section*.132}\protected@file@percent }
+\@writefile{toc}{\contentsline {paragraph}{\texttt  {ekf\_tracker/manipulation/gripper\_state\_inferrer.py} ($45$-line shim).}{24}{section*.133}\protected@file@percent }
+\gdef \@abspage@last{25}

@@ -60,23 +60,37 @@ class RelationOrchestrator:
 
     def __init__(
         self,
-        backend: str = "llm",
-        llm_model: str = "gpt-5.1",
-        ema_alpha: float = 0.3,
-        ema_threshold: float = 0.5,
-        score_threshold: float = 0.5,
-        trigger_cfg: Optional[RelationTriggerConfig] = None,
+        *,
+        backend: str,
+        llm_model: str,
+        llm_temperature: float,
+        ema_alpha: float,
+        ema_threshold: float,
+        ema_prune_threshold: float,
+        score_threshold: float,
+        rest_server_url: Optional[str],
+        trigger_cfg: RelationTriggerConfig,
         cache_dir: Optional[str] = None,
     ):
         self.backend = backend
         self.llm_model = llm_model
+        self.llm_temperature = float(llm_temperature)
         self.score_threshold = float(score_threshold)
+        self.rest_server_url = rest_server_url
         self._cache_dir = cache_dir
         self._client = None  # lazily initialised
-        self._filter = RelationFilter(alpha=ema_alpha,
-                                       threshold=ema_threshold)
+        self._filter = RelationFilter(
+            alpha=ema_alpha,
+            threshold=ema_threshold,
+            prune_threshold=ema_prune_threshold,
+        )
         self._state = RelationTriggerState()
-        self._cfg = trigger_cfg or RelationTriggerConfig()
+        if trigger_cfg is None:
+            raise TypeError(
+                "RelationOrchestrator: `trigger_cfg` is required "
+                "(no dataclass defaults; build via "
+                "ekf_tracker.configs.build_relation_trigger_config).")
+        self._cfg = trigger_cfg
         self._edges: List[RelationEdge] = []
         self._last_call_summary: Dict[str, Any] = {}
 
@@ -95,7 +109,9 @@ class RelationOrchestrator:
                 inner = LLMRelationClient(model_name=self.llm_model)
             elif self.backend == "rest":
                 from ekf_tracker.relations.relation_client import RESTRelationClient
-                inner = RESTRelationClient()
+                inner = (RESTRelationClient(server_url=self.rest_server_url)
+                         if self.rest_server_url is not None
+                         else RESTRelationClient())
             else:
                 print(f"[relation] unknown backend {self.backend!r} — disabled")
                 return None

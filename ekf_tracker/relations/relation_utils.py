@@ -30,7 +30,8 @@ from typing import Iterable, Optional, Set
 def expand_held_with_relations(
         held_id: Optional[int],
         edges: Iterable,
-        max_iters: int = 8,
+        *,
+        max_iters: int,
         ) -> Set[int]:
     """Return the transitive closure of {held_id} under "in"/"on" edges.
 
@@ -83,11 +84,14 @@ class RelationTriggerState:
 
 @dataclass
 class RelationTriggerConfig:
-    """Same knobs as `BernoulliConfig.relation_*` but standalone."""
-    relation_every_n_frames: int = 90
-    relation_on_grasp: bool = True
-    relation_on_release: bool = True
-    relation_on_new_object: bool = True
+    """Trigger-gate knobs for the relation backend. Required fields ---
+    no dataclass defaults; build via
+    :func:`ekf_tracker.configs.build_relation_trigger_config`.
+    """
+    relation_every_n_frames: int
+    relation_on_grasp: bool
+    relation_on_release: bool
+    relation_on_new_object: bool
 
 
 def should_recompute_relations(state: RelationTriggerState,

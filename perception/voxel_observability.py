@@ -84,12 +84,12 @@ class VoxelObservability:
 
     def __init__(
         self,
-        voxel_size_m: float = 0.02,
+        *,
+        voxel_size_m: float,
         workspace_aabb: Tuple[Tuple[float, float, float],
-                              Tuple[float, float, float]] = (
-            (-2.5, -2.5, -1.0), (2.5, 2.5, 2.0)),
-        n_min_hit: int = 2,
-        n_min_pass: int = 3,
+                              Tuple[float, float, float]],
+        n_min_hit: int,
+        n_min_pass: int,
     ):
         if voxel_size_m <= 0:
             raise ValueError("voxel_size_m must be positive")
@@ -115,9 +115,9 @@ class VoxelObservability:
         K: np.ndarray,
         T_cw: np.ndarray,
         *,
-        max_range_m: float = 3.0,
-        subsample: int = 4,
-        min_depth_m: float = 0.05,
+        max_range_m: float,
+        subsample: int,
+        min_depth_m: float,
     ) -> int:
         """Update the grid from one depth frame.
 

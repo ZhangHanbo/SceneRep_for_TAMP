@@ -24,7 +24,9 @@ from ekf_tracker.config import TriggerConfig
 from utils.slam_interface import PoseEstimate
 
 
-_TINY_COV = np.diag([1e-6] * 6)
+# _TINY_COV removed; the value now lives in
+# ``ekf_tracker/configs/default.yaml`` (``fast_tier_noise.tiny_cov_diag``)
+# and is exposed on the tracker as ``self._fast_tier_noise["tiny_cov"]``.
 
 
 class TwoTierOrchestratorGaussian(GaussianEkfTracker):
@@ -43,14 +45,27 @@ class TwoTierOrchestratorGaussian(GaussianEkfTracker):
                  K: np.ndarray,
                  bernoulli_cfg,
                  *,
-                 trigger: Optional[TriggerConfig] = None,
+                 trigger: TriggerConfig,
                  optimizer: Optional[PoseGraphOptimizer] = None,
                  pose_method: str = "icp_chain",
                  T_bc: Optional[np.ndarray] = None,
+                 visibility_kwargs: Optional[dict] = None,
+                 det_dedup_kwargs: Optional[dict] = None,
+                 process_noise_schedule: Optional[dict] = None,
+                 fast_tier_noise: Optional[dict] = None,
                  verbose: bool = False):
         super().__init__(K, bernoulli_cfg,
-                         pose_method=pose_method, T_bc=T_bc)
-        self.trigger = trigger or TriggerConfig()
+                         pose_method=pose_method, T_bc=T_bc,
+                         visibility_kwargs=visibility_kwargs,
+                         det_dedup_kwargs=det_dedup_kwargs,
+                         process_noise_schedule=process_noise_schedule,
+                         fast_tier_noise=fast_tier_noise)
+        if trigger is None:
+            raise TypeError(
+                "TwoTierOrchestratorGaussian: `trigger` is required "
+                "(no dataclass defaults; load via "
+                "ekf_tracker.configs.to_trigger_config)")
+        self.trigger = trigger
         self.optimizer = optimizer or PoseGraphOptimizer()
         self.last_opt_frame: int = -1
         self.verbose = bool(verbose)
@@ -179,7 +194,7 @@ class TwoTierOrchestratorGaussian(GaussianEkfTracker):
         Posteriors are written back via `state.inject_posterior_world`.
         """
         T_wb = np.asarray(T_wb, dtype=np.float64)
-        slam_pose = PoseEstimate(T=T_wb, cov=_TINY_COV)
+        slam_pose = PoseEstimate(T=T_wb, cov=self._fast_tier_noise["tiny_cov"])
         priors: Dict[int, PoseEstimate] = dict(
             self.state.collapsed_objects_world() or {})
 

@@ -76,10 +76,10 @@ class GraspOwnerDetector:
 
     def __init__(self,
                  gripper: GripperGeometry,
-                 min_inside_count: int = 20,
-                 fallback_radius_m: float = 0.05,
-                 perception_keys: Tuple[str, ...] =
-                     ("grasp_owner_pid", "is_grasped")):
+                 *,
+                 min_inside_count: int,
+                 fallback_radius_m: float,
+                 perception_keys: Tuple[str, ...]):
         self.gripper = gripper
         self.min_inside_count = int(min_inside_count)
         # Tier-3 (legacy nearest-track) radius. Tightened to 5 cm to

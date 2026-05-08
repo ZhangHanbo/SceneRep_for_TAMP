@@ -58,15 +58,29 @@ def main():
     width_map = viz._load_gripper_widths(
         str(ds_root / "pose_txt" / "joints_pose.json"))
 
-    cfg = viz.BernoulliConfig()
+    # Load the canonical default; BernoulliConfig is no-defaults post-Phase C.
+    from ekf_tracker.configs import load_config, to_bernoulli_config
+    ekf_cfg = load_config()
+    cfg = to_bernoulli_config(ekf_cfg,
+                                K=viz.K_DEFAULT, image_shape=(480, 640))
     tracker = viz.GaussianEkfTracker(K=viz.K_DEFAULT, bernoulli_cfg=cfg)
 
+    from ekf_tracker.configs import (
+        build_grasp_owner_detector_kwargs,
+        build_gripper_phase_tracker_kwargs,
+        build_relation_orchestrator_kwargs,
+    )
     grip = GripperPhaseTracker(
-        detector=GraspOwnerDetector(create_gripper_geometry("fetch")))
+        detector=GraspOwnerDetector(
+            create_gripper_geometry("fetch"),
+            **build_grasp_owner_detector_kwargs(ekf_cfg)),
+        **build_gripper_phase_tracker_kwargs(ekf_cfg),
+    )
+    # Backend comes from the YAML --- no env-var overrides.
     relations = RelationOrchestrator(
-        backend=os.environ.get("EKF_VIZ_RELATION_BACKEND", "none"),
         cache_dir=str(viz_root / "relation_cache"),
-        trigger_cfg=RelationTriggerConfig(relation_every_n_frames=90))
+        **build_relation_orchestrator_kwargs(ekf_cfg),
+    )
 
     for idx in range(488, 525):
         rgb = viz._load_rgb(str(rgb_dir / f"rgb_{idx:06d}.png"))
@@ -101,7 +115,10 @@ def main():
             det_to_oid=det_to_oid,
             current_phase=gs["phase"], current_oids=live_oids)
 
-        held_oids = expand_held_with_relations(held_seed, relations.edges)
+        from ekf_tracker.configs import build_held_set_expansion_kwargs
+        held_oids = expand_held_with_relations(
+            held_seed, relations.edges,
+            **build_held_set_expansion_kwargs(ekf_cfg))
         held_oids = {o for o in held_oids if o in tracker.state.objects}
 
         dbg, _ = tracker.step(

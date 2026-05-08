@@ -24,9 +24,11 @@ class RelationFilter:
     otherwise. An edge not detected this frame gets raw=0.
     """
 
-    def __init__(self, alpha: float = 0.3, threshold: float = 0.5):
+    def __init__(self, *, alpha: float, threshold: float,
+                 prune_threshold: float):
         self.alpha = alpha
         self.threshold = threshold
+        self.prune_threshold = prune_threshold
         self._ema: Dict[tuple, float] = {}
 
     def update(self, raw_edges: List[RelationEdge]) -> List[RelationEdge]:
@@ -56,5 +58,6 @@ class RelationFilter:
                     child_size=ref.child_size if ref else None,
                 ))
         # Prune dead edges (EMA decayed to near zero).
-        self._ema = {k: v for k, v in self._ema.items() if v > 0.01}
+        self._ema = {k: v for k, v in self._ema.items()
+                     if v > self.prune_threshold}
         return filtered

@@ -12,13 +12,18 @@ from ekf_tracker.relations.relation_utils import RelationTriggerConfig
 @pytest.fixture
 def orch():
     """Default orchestrator with backend disabled (we exercise EMA + remap directly)."""
-    return RelationOrchestrator(backend="none",
-                                 ema_alpha=0.3, ema_threshold=0.5,
-                                 trigger_cfg=RelationTriggerConfig(
-                                     relation_every_n_frames=10,
-                                     relation_on_grasp=False,
-                                     relation_on_release=False,
-                                     relation_on_new_object=False))
+    return RelationOrchestrator(
+        backend="none",
+        llm_model="gpt-5.1",
+        llm_temperature=0.0,
+        ema_alpha=0.3, ema_threshold=0.5, ema_prune_threshold=0.01,
+        score_threshold=0.5,
+        rest_server_url=None,
+        trigger_cfg=RelationTriggerConfig(
+            relation_every_n_frames=10,
+            relation_on_grasp=False,
+            relation_on_release=False,
+            relation_on_new_object=False))
 
 
 def test_first_call_fires(orch):
@@ -102,12 +107,18 @@ def test_parent_child_convention_in_p_parent_swap():
         def detect(self, rgb, bboxes, masks=None):
             return np.array([[0.0, 0.95], [0.0, 0.0]])
 
-    o = RelationOrchestrator(backend="none",
-                              trigger_cfg=RelationTriggerConfig(
-                                  relation_every_n_frames=1,
-                                  relation_on_grasp=False,
-                                  relation_on_release=False,
-                                  relation_on_new_object=False))
+    o = RelationOrchestrator(
+        backend="none",
+        llm_model="gpt-5.1",
+        llm_temperature=0.0,
+        ema_alpha=0.3, ema_threshold=0.5, ema_prune_threshold=0.01,
+        score_threshold=0.5,
+        rest_server_url=None,
+        trigger_cfg=RelationTriggerConfig(
+            relation_every_n_frames=1,
+            relation_on_grasp=False,
+            relation_on_release=False,
+            relation_on_new_object=False))
     o._client = _FakeClient()
     o.backend = "fake"
 
