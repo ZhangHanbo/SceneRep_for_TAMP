@@ -1,0 +1,45 @@
+/* SceneRep_for_TAMP — minor overrides on top of the Furo theme.
+ * The brand palette mirrors the original docs/ekf_tracker/index.html. */
+
+article.bd-article,
+article.pst-article,
+.content {
+    max-width: 80ch;
+}
+
+/* Tighter monospace so signatures read closer to source. */
+code, pre, .sig, .pre {
+    font-family: "SF Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+}
+
+/* Inline code: subtle warm tint matching the original site. */
+:not(pre) > code {
+    background: var(--color-background-secondary);
+    border: 1px solid color-mix(in srgb, var(--color-foreground-primary) 8%, transparent);
+    border-radius: 4px;
+    padding: 1px 4px;
+}
+
+/* API-reference signatures: a touch more whitespace. */
+dl.py.class > dt,
+dl.py.function > dt,
+dl.py.method > dt {
+    padding: 6px 8px;
+    background: var(--color-background-secondary);
+    border-left: 3px solid var(--color-brand-primary);
+    border-radius: 2px;
+}
+
+/* Tables: a bit denser. */
+table.docutils {
+    font-size: 0.95em;
+}
+table.docutils th {
+    background: var(--color-background-secondary);
+}
+
+/* Admonitions: mute the default Furo green/blue stripes for "note" so the
+ * brand color stays the loudest signal on the page. */
+.admonition.note {
+    border-left-color: var(--color-brand-primary);
+}

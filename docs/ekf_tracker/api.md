@@ -8,7 +8,7 @@ Per-frame Bernoulli-EKF object tracker. Five-method Python API, single-import:
 ## Install
 
 ```bash
-conda create -n scenerep python=3.11 && conda activate scenerep
+conda create -n dynamic_scene_graph python=3.11 && conda activate dynamic_scene_graph
 pip install --upgrade "jax[cuda]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 pip install -r requirements.txt
 ```
@@ -293,5 +293,5 @@ python scripts/eval_run.py --config configs/eval.yaml --tracker ekf
 - [`PLAN.md`](./PLAN.md) — implementation roadmap with status per task
 - [`improvements.md`](./improvements.md) — original EKF + factor-graph design notes
 - [`cov_anisotropy_explained.md`](./cov_anisotropy_explained.md) — covariance anisotropy under base motion
-- [`../survey_and_analysis.md`](../survey_and_analysis.md) — comparative survey vs other systems
-- [`../../README.md`](../../README.md) — top-level installation, ROS-bag conversion, tracker comparison
+- [`../background/survey_and_analysis.md`](../background/survey_and_analysis.md) — comparative survey vs other systems
+- [Installation](../getting_started/installation.md) and [Choosing a tracker](../getting_started/choosing_a_tracker.md) — top-level onboarding

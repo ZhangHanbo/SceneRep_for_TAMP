@@ -274,6 +274,23 @@ gravity_predict:
   workspace_floor_z: -1.0
   eps_roughness:     5.0e-3
   max_drop_m:        2.0
+  # Fix A — neighbourhood-median fallback for the all_unseen branch.
+  # Raycast down from `n_neighbourhood_samples` evenly-spaced angular
+  # samples on a circle of radius `r_neighbourhood_m` around the
+  # predicted-landing XY. If at least
+  # `min_neighbour_surfaces_for_median` columns find a surface, snap
+  # landing_z to the median of those surfaces (σ_z driven by the spread).
+  r_neighbourhood_m:                 0.30
+  n_neighbourhood_samples:           8
+  min_neighbour_surfaces_for_median: 3
+  # Fix B — visibility-based override (requires per-frame K + depth +
+  # T_cw + image_shape threaded into predict_landing_pose). Tolerance
+  # for declaring the release pose still in view (depth at projected
+  # release pixel matches release-pose camera-z within this many
+  # metres → skip gravity_predict entirely).
+  tol_release_visible_m:             0.05
+  min_depth_m:                       0.05
+  max_depth_m:                       5.0
 
 
 # ─────────────────────────────────────────────────────────────────────

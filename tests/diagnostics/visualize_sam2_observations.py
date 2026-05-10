@@ -61,7 +61,7 @@ DATA_BASE_FALLBACK = os.path.join(SCENEREP_ROOT, "datasets")
 def _resolve_data_root(trajectory: str) -> str:
     """Return ``<base>/<trajectory>`` for the first base where the
     trajectory actually exists on disk, so viz can target both the
-    Mobile_Manipulation_on_Fetch dataset and the SceneRep datasets/
+    Mobile_Manipulation_on_Fetch dataset and the Dynamic Scene Graph datasets/
     rosbag trajectories without extra flags."""
     for base in (DATA_BASE, DATA_BASE_FALLBACK):
         cand = os.path.join(base, trajectory)

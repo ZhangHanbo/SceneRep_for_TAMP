@@ -427,7 +427,9 @@ class EkfTracker:
                 and self._prev_held is not None
                 and self._prev_held in self._tracker.state.objects):
             try:
-                self._gravity_predict_at_release(slam_pose, dbg)
+                self._gravity_predict_at_release(
+                    slam_pose, dbg,
+                    depth=depth, T_bc=T_bc_for_vox)
             except Exception as e:
                 print(f"[WARN] gravity_predict failed at fr "
                       f"{self._frame_idx}: {e}")
@@ -473,7 +475,11 @@ class EkfTracker:
 
     def _gravity_predict_at_release(self,
                                      slam_pose: np.ndarray,
-                                     dbg: Dict[str, Any]) -> None:
+                                     dbg: Dict[str, Any],
+                                     *,
+                                     depth: Optional[np.ndarray] = None,
+                                     T_bc: Optional[np.ndarray] = None,
+                                     ) -> None:
         prev_held = int(self._prev_held) if self._prev_held is not None else None
         if prev_held is None:
             return
@@ -496,6 +502,15 @@ class EkfTracker:
             other_voxels.append((
                 float(T_o[0, 3]), float(T_o[1, 3]), float(T_o[2, 3]),
                 float(other_dyn.radius_m)))
+        # Fix B plumbing: per-frame depth + T_cw enable the visibility
+        # override; if any input is missing, predict_landing_pose silently
+        # falls through to Fix A / parametric branches.
+        T_cw = None
+        image_shape = None
+        if depth is not None and T_bc is not None:
+            T_cw = (np.asarray(slam_pose, dtype=np.float64)
+                    @ np.asarray(T_bc, dtype=np.float64))
+            image_shape = (int(depth.shape[0]), int(depth.shape[1]))
         T_land, P_land, info = predict_landing_pose(
             T_release=pe_w.T,
             P_release=pe_w.cov,
@@ -503,6 +518,10 @@ class EkfTracker:
             dyn=dyn,
             shape_footprint_factors=self._dynamics_footprint,
             live_object_voxels=other_voxels,
+            K=self.K,
+            depth=depth,
+            T_cw=T_cw,
+            image_shape=image_shape,
             **self._gravity_predict_kwargs,
         )
         # Write back into base-frame state.

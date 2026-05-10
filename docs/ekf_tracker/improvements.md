@@ -1,5 +1,15 @@
 # Minimal-Effort Improvements for Tight Coupling
 
+```{admonition} Historical document
+:class: note
+
+This is the **original design proposal** for the per-object EKF and the
+factor-graph smoother (written 2026-04-30).  Both are now implemented; the
+production code is broader than the snippets below.  Use this page as
+*context* on why the design ended up where it did, then read
+[API reference](api_reference.rst) for the current code.
+```
+
 > **Implementation Status (2026-04-30):** Both improvements are implemented;
 > the actual code is broader than the snippets below.
 >

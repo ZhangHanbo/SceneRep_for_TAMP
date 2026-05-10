@@ -1,13 +1,13 @@
 """
-SceneRep Public API
-===================
+Dynamic Scene Graph — Public API
+================================
 
 Consumer-driven API for robi_butler integration.
 All external consumers should import from here.
 
 Usage:
-    from SceneRep_for_TAMP.api import ObjectReconstructor, ObjectTracker, PoseUpdater, RelationAnalyzer
-    from SceneRep_for_TAMP.api import Mesh, TrackedObject, FrameDetections, RelationGraph
+    from dynamic_scene_graph.api import ObjectReconstructor, ObjectTracker, PoseUpdater, RelationAnalyzer
+    from dynamic_scene_graph.api import Mesh, TrackedObject, FrameDetections, RelationGraph
 """
 
 from __future__ import annotations

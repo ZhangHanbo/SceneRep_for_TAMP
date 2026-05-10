@@ -2231,6 +2231,19 @@ def main():
                         other_voxels.append((
                             float(T_o[0, 3]), float(T_o[1, 3]),
                             float(T_o[2, 3]), float(other_dyn.radius_m)))
+                    # Fix B plumbing: per-frame K + depth + T_cw enable
+                    # the visibility-based override branches inside
+                    # predict_landing_pose. If any input is missing
+                    # (e.g. T_bc unavailable), the function silently
+                    # falls through to Fix A / parametric branches.
+                    T_cw_for_predict = None
+                    image_shape_for_predict = None
+                    if depth is not None and T_bc_now is not None:
+                        T_cw_for_predict = (
+                            np.asarray(T_wb, dtype=np.float64)
+                            @ np.asarray(T_bc_now, dtype=np.float64))
+                        image_shape_for_predict = (int(depth.shape[0]),
+                                                     int(depth.shape[1]))
                     T_land, P_land, info = predict_landing_pose(
                         T_release=pe_w.T,
                         P_release=pe_w.cov,
@@ -2238,6 +2251,10 @@ def main():
                         dyn=dyn,
                         shape_footprint_factors=_dyn_footprint,
                         live_object_voxels=other_voxels,
+                        K=K_DEFAULT,
+                        depth=depth,
+                        T_cw=T_cw_for_predict,
+                        image_shape=image_shape_for_predict,
                         **_gravity_predict_kwargs,
                     )
                     # Write back into base-frame state. The EKF stores

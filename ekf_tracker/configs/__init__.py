@@ -468,6 +468,14 @@ def build_gravity_predict_kwargs(cfg: Dict[str, Any]) -> Dict[str, Any]:
         "workspace_floor_z": float(gp("workspace_floor_z")),
         "eps_roughness":     float(gp("eps_roughness")),
         "max_drop_m":        float(gp("max_drop_m")),
+        # Fix A — neighbourhood-median for all_unseen.
+        "r_neighbourhood_m":                  float(gp("r_neighbourhood_m")),
+        "n_neighbourhood_samples":            int(gp("n_neighbourhood_samples")),
+        "min_neighbour_surfaces_for_median":  int(gp("min_neighbour_surfaces_for_median")),
+        # Fix B — visibility-based override.
+        "tol_release_visible_m": float(gp("tol_release_visible_m")),
+        "min_depth_m":           float(gp("min_depth_m")),
+        "max_depth_m":           float(gp("max_depth_m")),
     }
 
 

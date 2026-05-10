@@ -1,5 +1,5 @@
 """
-Unit tests for the SceneRep API.
+Unit tests for the Dynamic Scene Graph API.
 
 Tests are organized into:
 1. Data class tests (no dependencies beyond numpy)
@@ -27,7 +27,7 @@ import numpy as np
 import pytest
 import cv2
 
-# Ensure SceneRep root is on path
+# Ensure Dynamic Scene Graph root is on path
 SCENEREP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SCENEREP_ROOT)
 

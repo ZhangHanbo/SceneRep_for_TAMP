@@ -20,10 +20,10 @@ import os
 import pytest
 
 
-STATE_DIR = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "tests", "visualization_pipeline", "apple_drop", "ekf_state",
-)
+_THIS = os.path.dirname(os.path.abspath(__file__))           # tests/integration
+_REPO = os.path.dirname(os.path.dirname(_THIS))               # repo root
+STATE_DIR = os.path.join(_REPO, "tests", "visualization_pipeline",
+                          "apple_drop", "ekf_state")
 
 
 def _load_state(frame: int) -> dict:
@@ -38,22 +38,22 @@ def _load_state(frame: int) -> dict:
 
 
 def _find_release_frame() -> int:
-    """Walk frames forward, return the first one whose phase is 'idle'
-    after a non-idle phase. apple_drop releases around fr 274 in the
-    current dataset; this helper does not hard-code that number."""
-    last_phase: str = "idle"
+    """Walk frames forward; return the first frame that carries a
+    non-null ``gravity_predict`` record.
+
+    With Option-A's trigger, gravity_predict fires at the
+    holding→{releasing, idle} edge (the FRAME the gripper opens),
+    not at the releasing→idle dwell exit. So we look for the
+    actual record rather than recompute the FSM transition."""
     for frame in range(0, 420):
         path = os.path.join(STATE_DIR, f"frame_{frame:06d}.json")
         if not os.path.exists(path):
             continue
         with open(path) as f:
             d = json.load(f)
-        cur_phase = d.get("gripper_state", {}).get("phase", "idle")
-        if (last_phase in ("holding", "releasing")
-                and cur_phase not in ("holding", "releasing")):
+        if d.get("gravity_predict") is not None:
             return frame
-        last_phase = cur_phase
-    pytest.skip("No release transition found in apple_drop fixtures.")
+    pytest.skip("No gravity_predict record found in apple_drop fixtures.")
 
 
 # ---------------------------------------------------------------------
@@ -72,11 +72,19 @@ class TestGravityPredictAppleDrop:
         # Record schema sanity.
         for k in ("column_state", "drop_height_m", "surface_z",
                   "first_unseen_z", "floor_z", "sigma_xy", "sigma_z",
-                  "sigma_yaw", "landing_z", "skipped", "oid", "frame"):
+                  "sigma_yaw", "landing_z", "skipped", "oid", "frame",
+                  "n_neighbour_surfaces", "landing_visible_depth_m"):
             assert k in gp, f"missing key {k!r} in gravity_predict log"
-        assert gp["skipped"] is False, "gravity_predict skipped at release"
+        # `release_visible` is the only branch that legitimately sets
+        # skipped=True (apple still in view at release; perception will
+        # update normally). All other branches must produce a real prior.
+        if gp["column_state"] != "release_visible":
+            assert gp["skipped"] is False, (
+                f"gravity_predict skipped at release with non-release-visible "
+                f"column_state {gp['column_state']!r}")
         assert gp["column_state"] in (
-            "hit_occupied", "mixed_unseen", "all_unseen", "all_empty")
+            "hit_occupied", "mixed_unseen", "all_unseen", "all_empty",
+            "release_visible", "landing_visible", "neighbourhood_median")
         assert gp["frame"] == release_frame
 
     def test_predicted_landing_is_below_release(self):
@@ -116,6 +124,12 @@ class TestGravityPredictAppleDrop:
         release_frame = _find_release_frame()
         d = _load_state(release_frame)
         gp = d["gravity_predict"]
+        if gp["column_state"] == "release_visible":
+            # Skip-and-defer branch: perception handles it on the next
+            # frame, so all sigmas are 0 by design.
+            assert gp["sigma_xy"] == 0.0
+            assert gp["sigma_z"] == 0.0
+            return
         assert gp["sigma_xy"] > 0.0
         assert gp["sigma_z"] > 0.0
         assert 0.0 <= gp["sigma_yaw"] <= 3.2  # ≤ π

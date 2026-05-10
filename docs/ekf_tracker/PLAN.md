@@ -1,4 +1,14 @@
-# SceneRep Improvement Plan — Condensed
+# Dynamic Scene Graph Improvement Plan — Condensed
+
+```{admonition} Historical document
+:class: note
+
+This is the **original improvement roadmap**, written 2026-04-30.  Tasks 1–7
+have since landed; specific file paths and class names below may be stale.
+For the current code state, see [API reference](api_reference.rst) and
+[Architecture overview](../architecture/overview.md).  This page is preserved
+because it documents the *design narrative* — why each subsystem exists.
+```
 
 > **Implementation Status (2026-04-30):** Tasks 1–7 are largely landed. The
 > two-tier orchestrator runs in `pose_update/orchestrator.py` (Bernoulli/RBPF
@@ -35,7 +45,7 @@ Decoupled, actionable tasks. Each item can be implemented independently. Orderin
 
 ## Scope
 
-Transform SceneRep from a sequential pipeline into a two-tier architecture: per-object EKF (fast) + joint pose graph over movable objects (slow). Uncertainty from Layer 1 (SLAM) propagates down; movable objects do not feed back into Layer 1.
+Transform Dynamic Scene Graph from a sequential pipeline into a two-tier architecture: per-object EKF (fast) + joint pose graph over movable objects (slow). Uncertainty from Layer 1 (SLAM) propagates down; movable objects do not feed back into Layer 1.
 
 ---
 

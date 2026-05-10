@@ -1,75 +1,32 @@
-# scenerep
+# Dynamic Scene Graph
 
-Object-centric 3D scene representation for robotic manipulation. Given a stream
-of RGB-D frames, SLAM poses, and gripper proprioception, the package tracks
-every object's world-frame pose, geometry, existence, and pairwise spatial
-relations across grasp / lift / drop interactions. Two interchangeable trackers
-are exposed (a deterministic TSDF + Hungarian variant and a probabilistic
-Bernoulli-EKF variant) plus a visual-only ICP baseline.
+Object-centric, dynamic 3D scene-graph representation for robotic manipulation.
+Given a stream of RGB-D frames, SLAM poses, and gripper proprioception, the
+package tracks every object's world-frame pose, geometry, existence, and
+pairwise spatial relations across grasp / lift / drop interactions.
 
 ## Quickstart
 
 ```bash
-conda create -n scenerep python=3.11 && conda activate scenerep
-pip install --upgrade "jax[cuda]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
+git clone git@github.com:ZhangHanbo/dynamic_scene_graph.git
+cd dynamic_scene_graph
+
+conda create -n dynamic_scene_graph python=3.11
+conda activate dynamic_scene_graph
 pip install -r requirements.txt
+pip install -e .
+
+python demo/run_demo.py
 ```
 
-For the live detection path, also fetch the
-[OWLv2 ST/FT-ens](https://storage.googleapis.com/scenic-bucket/owl_vit/checkpoints/owl2-b16-960-st-ngrams-curated-ft-lvisbase-ens-cold-weight-05_209b65b)
-and [SAM ViT-B](https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth)
-checkpoints into `scripts/rosbag2dataset/{owl,sam}/` and update
-`checkpoint_path` in the OWL config. Tracking on cached detections does not
-need either checkpoint.
+`demo/run_demo.py` extracts the bundled `demo/apple_in_the_tray.zip`
+(a 37-frame slice of a real Fetch trajectory) into the repo root and
+runs the EKF tracker over it. Expected output: one line per frame
+listing each tracked object's world-frame position and Bernoulli
+existence probability, e.g.
 
-## APIs
-
-Three top-level Python packages export the user-facing surface.
-
-### `heuristic_tracker` — TSDF + Hungarian + ICP
-
-Deterministic, no probabilistic state; the production path used by
-`robi_butler` and the offline / realtime demos. Use this for fast deterministic
-pose updates with TSDF geometry.
-
-```python
-from heuristic_tracker import (
-    ObjectReconstructor, ObjectTracker, PoseUpdater, RelationAnalyzer,
-)
 ```
-
-### `ekf_tracker` — two-tier Bernoulli-EKF
-
-Probabilistic tracker on SE(3) with a Bernoulli existence model and an
-optional slow-tier pose graph. Output carries 6×6 covariance and existence
-probability per object. Use this for research, occlusion-heavy scenes, or
-anywhere uncertainty matters.
-
-```python
-from ekf_tracker import EkfTracker
-
-tracker = EkfTracker(K=K, T_bc=T_bc)
-scene   = tracker.step(detections, rgb, depth, slam_pose=T_wb,
-                       T_bg=T_bg, gripper_width=w, joints=joints)
+frame 0488  objects: 0:apple@[-0.12, 0.41, 0.78] r=0.97, 1:tray@[-0.05, 0.39, 0.74] r=0.99
+…
+done.
 ```
-
-Five public methods: `detect`, `step`, `get_scene`, `get_points`, `smooth`.
-Full reference at [`docs/ekf_tracker/index.html`](docs/ekf_tracker/index.html).
-
-### `baselines` — visual-only ICP
-
-Direct ICP composition with no filter and no proprioception. For ablation
-only.
-
-```python
-from baselines import VisualOnlyTracker
-```
-
-## See also
-
-- [`docs/ekf_tracker/index.html`](docs/ekf_tracker/index.html) — EKF API reference
-- [`docs/ekf_tracker/DISCUSSION.md`](docs/ekf_tracker/DISCUSSION.md) — architectural rationale
-- [`docs/ekf_tracker/latex/bernoulli_ekf.pdf`](docs/ekf_tracker/latex/bernoulli_ekf.pdf) — algorithm derivation
-- [`docs/survey_and_analysis.md`](docs/survey_and_analysis.md) — comparative survey
-- [`scripts/examples/`](scripts/examples/) — runnable recipes
-- [`scripts/rosbag2dataset/`](scripts/rosbag2dataset/) — ROS-bag → dataset conversion

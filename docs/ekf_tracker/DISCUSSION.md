@@ -1,6 +1,6 @@
 # System Design Discussion: Hierarchical Movable Object Tracking
 
-This document captures the design discussion for the SceneRep system architecture, drawing on three key papers and converging on a final two-tier design.
+This document captures the design discussion for the Dynamic Scene Graph system architecture, drawing on three key papers and converging on a final two-tier design.
 
 ## Reference Papers
 

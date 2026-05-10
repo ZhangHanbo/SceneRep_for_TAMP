@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Sequential visualization of SceneRep API results.
+Sequential visualization of Dynamic Scene Graph API results.
 
 Processes a trajectory frame by frame and produces:
 1. Per-frame RGB with tracked object overlays (masks, IDs, labels)
@@ -30,7 +30,7 @@ import cv2
 from PIL import Image
 from scipy.spatial.transform import Rotation
 
-# Ensure SceneRep root is on path
+# Ensure Dynamic Scene Graph root is on path
 SCENEREP_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, SCENEREP_ROOT)
 
@@ -344,7 +344,7 @@ def visualize_3d(tracked_objects, relations=None):
         print("\nOpening 3D viewer... (close the window to exit)")
         o3d.visualization.draw_geometries(
             geometries,
-            window_name="SceneRep - Final 3D Reconstruction",
+            window_name="Dynamic Scene Graph - Final 3D Reconstruction",
             width=1280, height=720,
         )
 
@@ -354,7 +354,7 @@ def visualize_3d(tracked_objects, relations=None):
 # ─────────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Visualize SceneRep API results")
+    parser = argparse.ArgumentParser(description="Visualize Dynamic Scene Graph API results")
     parser.add_argument("--data", default=DATA_ROOT, help="Path to trajectory data")
     parser.add_argument("--frames", type=int, default=80, help="Number of frames to process")
     parser.add_argument("--step", type=int, default=3, help="Process every N-th frame")

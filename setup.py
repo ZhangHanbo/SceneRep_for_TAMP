@@ -1,9 +1,9 @@
 from setuptools import setup, find_packages
 
 setup(
-    name='scenerep',
+    name='dynamic_scene_graph',
     version='1.0.0',
-    description='Scene representation and tracking for mobile manipulation.',
+    description='Dynamic scene graph: object-centric scene representation and tracking for mobile manipulation.',
     packages=find_packages(include=[
         'perception', 'perception.*',
         'utils', 'utils.*',
